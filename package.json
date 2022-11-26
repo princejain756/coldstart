@@ -1,0 +1,32 @@
+{
+  "name": "coldstart-cli",
+  "version": "0.1.0",
+  "description": "Reads the install instructions out of a README and prints the commands a new user has to type.",
+  "type": "module",
+  "bin": {
+    "coldstart-cli": "bin/coldstart.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "keywords": [
+    "readme",
+    "quickstart",
+    "install",
+    "docs",
+    "developer-experience"
+  ],
+  "license": "MIT",
+  "author": "Prince Jain",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/princejain756/coldstart"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
