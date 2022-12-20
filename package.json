@@ -1,7 +1,7 @@
 {
   "name": "coldstart-cli",
   "version": "0.1.0",
-  "description": "Reads the install instructions out of a README and prints the commands a new user has to type.",
+  "description": "Replays your README's install instructions in a clean checkout and reports where a new user hits a wall.",
   "type": "module",
   "bin": {
     "coldstart-cli": "bin/coldstart.js"
