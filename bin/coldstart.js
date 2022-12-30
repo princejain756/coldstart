@@ -52,3 +52,18 @@ try {
     );
     process.exit(2);
   }
+
+  const { results } = await replay(steps, {
+    cloneDir,
+    keepGoing: args.keepGoing,
+  });
+
+  console.log("");
+  console.log("coldstart - fresh-clone replay");
+  console.log(`repo: ${resolve(target)}   readme: ${readme.name}   staged: ${how}`);
+  console.log("");
+  results.forEach((r, i) => {
+    const ms = r.ms != null ? `${r.ms}ms` : "";
+    const why = r.why ? `  (${r.why})` : "";
+    console.log(`  ${String(i + 1).padStart(2)} ${r.status.padEnd(4)} ${ms.padStart(7)} ${r.cmd}${why}`);
+  });
