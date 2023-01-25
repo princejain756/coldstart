@@ -67,3 +67,19 @@ try {
     const why = r.why ? `  (${r.why})` : "";
     console.log(`  ${String(i + 1).padStart(2)} ${r.status.padEnd(4)} ${ms.padStart(7)} ${r.cmd}${why}`);
   });
+
+  const firstFail = results.find((r) => r.status === "fail" || r.status === "timeout");
+  if (firstFail?.tail) {
+    console.log("");
+    console.log("  last output lines:");
+    for (const l of firstFail.tail.split("\n")) console.log(`    ${l}`);
+  }
+  console.log("");
+  const idx = results.indexOf(firstFail) + 1;
+  console.log(
+    firstFail
+      ? `verdict: BROKEN at step ${idx} - a new user following your README hits a wall there.`
+      : `verdict: PASSES - ${results.length}/${results.length} steps ran clean in a fresh clone.`
+  );
+  console.log("");
+  process.exit(firstFail ? 1 : 0);
