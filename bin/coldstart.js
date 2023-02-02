@@ -83,3 +83,8 @@ try {
   );
   console.log("");
   process.exit(firstFail ? 1 : 0);
+} finally {
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {}
+}
