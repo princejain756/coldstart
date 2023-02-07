@@ -1,45 +1,51 @@
 # coldstart
 
-**What does a fresh clone actually have to run?**
+**Does your repo pass a fresh clone?**
 
-A README is a set of instructions, and the instructions rot. coldstart reads
-your README, pulls out the shell commands it tells a stranger to type, and
-prints them in order so you can see the list your project is really asking
-for.
+Every README makes a promise: run these commands and it works. coldstart
+checks the promise. It copies your repo into a clean temp dir, then runs the
+commands your README tells a stranger to run, in order.
 
 ```bash
-npx coldstart-cli          # the repo in the current directory
-npx coldstart-cli <path>   # or any local checkout
+npx coldstart-cli              # the repo in the current directory
+npx coldstart-cli <path>       # a local repo
+npx coldstart-cli <git-url>    # or straight from GitHub
 ```
 
-Output for this repo's own example:
+## What it does
+
+1. **Stages the committed state** into a temp dir, so `node_modules` and
+   `.env` files can't hide the breakage. Git repos are cloned at depth 1;
+   anything else is copied minus the usual build folders.
+2. **Parses the README** for shell blocks, keeping the heading each step
+   came from so the report can say where a command lives.
+3. **Replays each command** in order, in the clone, and stops at the first
+   one that exits non-zero.
+4. **Verdict**: PASSES, or BROKEN at the step where a new user hits the wall,
+   with the last lines of real output.
 
 ```
-coldstart - README.md in /Users/princejain756/src/broken-quickstart
+coldstart - fresh-clone replay
+repo: /Users/princejain756/src/broken-quickstart   readme: README.md   staged: copy of working dir (not a git repo)
 
-   1  npm install  (Install)
-   2  npm run start  (Install)
-   3  npm run build  (Install)
+   1 ok     502ms npm install
+   2 fail   200ms npm run start
+   3 skip         npm run build  (after failure)
 
-3 step(s) to run
+  last output lines:
+    npm error
+    npm error To see a list of scripts, run:
+    npm error   npm run
+
+verdict: BROKEN at step 2 - a new user following your README hits a wall there.
 ```
 
-## How it reads a README
+The exit code is non-zero when the replay breaks, so it drops into CI.
 
-- Every fenced block that is tagged as a shell (`bash`, `sh`, `console`,
-  `shell`, `zsh`, `terminal`, or no language at all) is a candidate.
-- Prompt characters (`$ `, `> `) are stripped, `#` comments are dropped.
-- Lines that do not start with something that looks like a command are
-  treated as pasted program output and left out.
-- Each step keeps the heading it appeared under, so the report can say
-  whether a command came from Install or from Contributing.
+## Options
 
-Nothing is executed yet. This is the map, not the drive.
-
-## Why bother
-
-Because the map is already wrong in most repos: a `npm run start` when the
-script is called `build`, a `./scripts/setup.sh` nobody committed. Listing the
-steps is the first step to catching that.
+```
+--keep-going   don't stop at the first failure
+```
 
 MIT
