@@ -1,6 +1,6 @@
 {
   "name": "coldstart-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Replays your README's install instructions in a clean checkout and reports where a new user hits a wall.",
   "type": "module",
   "bin": {
@@ -18,7 +18,8 @@
     "quickstart",
     "install",
     "docs",
-    "developer-experience"
+    "developer-experience",
+    "fresh-clone"
   ],
   "license": "MIT",
   "author": "Prince Jain",
