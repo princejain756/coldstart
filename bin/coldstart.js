@@ -2,6 +2,7 @@
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { readReadme, extractSteps } from "../src/readme.js";
+import { staticChecks } from "../src/checks.js";
 import { stageClone, replay } from "../src/replay.js";
 
 const HELP = `coldstart - does your repo pass a fresh clone?
@@ -11,17 +12,19 @@ usage:
   coldstart --help
 
 options:
-  --keep-going   don't stop at the first failure
+  --only-static   run the checks, skip executing anything
+  --keep-going    don't stop at the first failure
   -h, --help
 `;
 
-const args = { target: null, keepGoing: false };
+const args = { target: null, onlyStatic: false, keepGoing: false };
 const argv = process.argv.slice(2);
 for (const a of argv) {
   if (a === "--help" || a === "-h") {
     console.log(HELP);
     process.exit(0);
-  } else if (a === "--keep-going") args.keepGoing = true;
+  } else if (a === "--only-static") args.onlyStatic = true;
+  else if (a === "--keep-going") args.keepGoing = true;
   else if (!a.startsWith("-") && !args.target) args.target = a;
   else {
     console.error(`unknown flag: ${a}`);
@@ -53,38 +56,36 @@ try {
     process.exit(2);
   }
 
-  const { results } = await replay(steps, {
-    cloneDir,
-    keepGoing: args.keepGoing,
-  });
+  const findings = staticChecks(cloneDir, steps);
+  let results = [];
+  if (!args.onlyStatic) {
+    ({ results } = await replay(steps, { cloneDir, keepGoing: args.keepGoing }));
+  }
 
   console.log("");
   console.log("coldstart - fresh-clone replay");
   console.log(`repo: ${resolve(target)}   readme: ${readme.name}   staged: ${how}`);
-  console.log("");
-  results.forEach((r, i) => {
-    const ms = r.ms != null ? `${r.ms}ms` : "";
-    const why = r.why ? `  (${r.why})` : "";
-    console.log(`  ${String(i + 1).padStart(2)} ${r.status.padEnd(4)} ${ms.padStart(7)} ${r.cmd}${why}`);
-  });
-
-  const firstFail = results.find((r) => r.status === "fail" || r.status === "timeout");
-  if (firstFail?.tail) {
-    console.log("");
-    console.log("  last output lines:");
-    for (const l of firstFail.tail.split("\n")) console.log(`    ${l}`);
+  if (staged.uncommitted) {
+    console.log(
+      `note: replayed committed state; ${staged.uncommitted} uncommitted file(s) not included`
+    );
   }
   console.log("");
-  const idx = results.indexOf(firstFail) + 1;
-  console.log(
-    firstFail
-      ? `verdict: BROKEN at step ${idx} - a new user following your README hits a wall there.`
-      : `verdict: PASSES - ${results.length}/${results.length} steps ran clean in a fresh clone.`
-  );
+
+  console.log("static checks (against the clean clone)");
+  for (const f of findings) {
+    const where = f.line ? `  [line ${f.line}]` : "";
+    console.log(`  ${f.level.padEnd(5)} ${f.msg}${where}`);
+  }
   console.log("");
-  process.exit(firstFail ? 1 : 0);
-} finally {
-  try {
-    rmSync(tmp, { recursive: true, force: true });
-  } catch {}
-}
+
+  if (results.length) {
+    console.log(`replay (${results.length} steps)`);
+    results.forEach((r, i) => {
+      const ms = r.ms != null ? `${r.ms}ms` : "";
+      const why = r.why ? `  (${r.why})` : "";
+      console.log(
+        `  ${String(i + 1).padStart(2)} ${r.status.padEnd(4)} ${ms.padStart(7)} ${r.cmd}${why}`
+      );
+    });
+  }
