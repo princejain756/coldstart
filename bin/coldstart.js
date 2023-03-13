@@ -89,3 +89,35 @@ try {
       );
     });
   }
+
+  const firstFail = results.find((r) => r.status === "fail" || r.status === "timeout");
+  if (firstFail?.tail) {
+    console.log("");
+    console.log("  last output lines:");
+    for (const l of firstFail.tail.split("\n")) console.log(`    ${l}`);
+  }
+  console.log("");
+  const flags = findings.filter((f) => f.level === "flag").length;
+  if (!results.length) {
+    console.log(
+      flags
+        ? `verdict: STATIC ONLY - ${flags} flag(s) found, nothing executed.`
+        : "verdict: STATIC ONLY - clean, nothing executed."
+    );
+  } else if (firstFail) {
+    const idx = results.indexOf(firstFail) + 1;
+    console.log(
+      `verdict: BROKEN at step ${idx} - a new user following your README hits a wall there.`
+    );
+  } else if (flags) {
+    console.log(
+      `verdict: RUNS, but ${flags} static flag(s) - the steps ran on this machine yet may still trip a stranger.`
+    );
+  } else {
+    console.log(
+      `verdict: PASSES - ${results.length}/${results.length} steps ran clean in a fresh clone.`
+    );
+  }
+  console.log("");
+  // static-only mode fails on flags too - that's the whole point of the gate
+  process.exit(firstFail || (args.onlyStatic && flags) ? 1 : 0);
