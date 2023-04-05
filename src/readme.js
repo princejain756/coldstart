@@ -90,3 +90,9 @@ export function readReadme(dir) {
   if (!name) return null;
   return { name, text: readFileSync(join(dir, name), "utf8") };
 }
+
+// Commands that should not be auto-replayed: they'd mutate the host, ask for
+// input we can't give, or only make sense outside a clone.
+const SKIP_RE =
+  /^\s*(sudo\b|open\b|code\b|xcode-select|ssh\b|git\s+push|npm\s+publish|gh\s+repo\s+create|docker\s+push|rm\s+-rf?\s*\/|say\b|osascript|npm\s+(i|install)\s+(-g|--global)\b|brew\s+install\b|brew\s+services\b)/;
+const INTERACTIVE_HINT = /create-(next|vite|react|expo|remix|nuxt|svelte)-app|npm\s+init|yarn\s+create|pnpm\s+create|read\s+-/;
