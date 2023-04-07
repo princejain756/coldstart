@@ -96,3 +96,9 @@ export function readReadme(dir) {
 const SKIP_RE =
   /^\s*(sudo\b|open\b|code\b|xcode-select|ssh\b|git\s+push|npm\s+publish|gh\s+repo\s+create|docker\s+push|rm\s+-rf?\s*\/|say\b|osascript|npm\s+(i|install)\s+(-g|--global)\b|brew\s+install\b|brew\s+services\b)/;
 const INTERACTIVE_HINT = /create-(next|vite|react|expo|remix|nuxt|svelte)-app|npm\s+init|yarn\s+create|pnpm\s+create|read\s+-/;
+
+export function classifyStep(cmd) {
+  if (SKIP_RE.test(cmd)) return { run: false, why: "host-side command" };
+  if (INTERACTIVE_HINT.test(cmd)) return { run: false, why: "interactive" };
+  return { run: true };
+}
