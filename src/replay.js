@@ -59,14 +59,35 @@ export function stageClone(target) {
   return { dir: dest, tmp, how: "copy of working dir (not a git repo)", uncommitted: 0 };
 }
 
+const ASSIGN_RE =
+  /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(("([^"]*)")|('([^']*)')|[^\s]+)\s*$/;
+const CD_RE = /^cd\s+([^\s;&|]+)\s*$/;
+const CD_THEN_RE = /^cd\s+([^\s;&|]+)\s*(?:&&|;)\s*(.+)$/;
+
+function expandVars(val, env) {
+  return val.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (m, name) =>
+    env[name] ?? process.env[name] ?? ""
+  );
+}
+
+function parseAssignment(cmd) {
+  const clean = cmd.replace(/\s+#.*$/, ""); // trailing comment
+  if (/\$\(|`/.test(clean)) return null; // command substitution: run in shell
+  const m = clean.match(ASSIGN_RE);
+  if (!m) return null;
+  const raw = m[3] ?? m[5] ?? m[2];
+  return { name: m[1], value: raw, singleQuoted: m[5] != null };
+}
+
 const STEP_TIMEOUT = 240_000;
 
 // Run one shell command in the staged clone and report what happened.
-function runOnce(cmd, { cwd, timeoutMs }) {
+function runOnce(cmd, { cwd, env, timeoutMs }) {
   return new Promise((resolveP) => {
     const t0 = Date.now();
     const proc = spawn("sh", ["-c", cmd], {
       cwd,
+      env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";
@@ -92,47 +113,37 @@ function runOnce(cmd, { cwd, timeoutMs }) {
 }
 
 export async function replay(steps, opts) {
-  const { cloneDir, keepGoing = false } = opts;
+  const { cloneDir, classifyStep, keepGoing = false } = opts;
 
+  // `export KEY=value` steps build a session env that later steps inherit,
+  // which is how a README's "set this, then run that" sequence is meant to go
+  const env = {};
   let cwd = cloneDir;
   const results = [];
   let stopped = false;
 
+  const doCd = (target) => {
+    const clean = target.replace(/^["']|["']$/g, "");
+    const next = resolve(cwd, clean);
+    const inside = next === cloneDir || next.startsWith(cloneDir + "/");
+    const finalDir = inside ? next : cloneDir;
+    const ok = existsSync(finalDir);
+    if (ok) cwd = finalDir;
+    return { ok, at: cwd.slice(cloneDir.length) || "/" };
+  };
+
   for (const step of steps) {
+    let { cmd } = step;
     if (stopped) {
       results.push({ ...step, status: "skip", why: "after failure" });
       continue;
     }
 
-    // `cd` steps move the session for everything that follows
-    const cdTo = step.cmd.match(/^cd\s+([^\s;&|]+)$/)?.[1];
-    if (cdTo) {
-      const next = resolve(cwd, cdTo);
-      if (next.startsWith(cloneDir) && existsSync(next)) {
-        cwd = next;
-        results.push({ ...step, status: "cd", why: cwd.slice(cloneDir.length) || "/" });
-      } else {
-        results.push({ ...step, status: "fail", why: "no such dir" });
-        stopped = !keepGoing;
-      }
+    const assign = parseAssignment(cmd);
+    if (assign) {
+      env[assign.name] = assign.singleQuoted
+        ? assign.value
+        : expandVars(assign.value, env);
+      results.push({ ...step, status: "env", value: assign.name });
       continue;
     }
-
-    const r = await runOnce(step.cmd, { cwd, timeoutMs: STEP_TIMEOUT });
-    let status;
-    if (r.timedOut) status = "timeout";
-    else if (r.code === 0) status = "ok";
-    else status = "fail";
-
-    results.push({
-      ...step,
-      status,
-      ms: r.ms,
-      code: r.code,
-      tail: (r.err || r.out || "").trim().split("\n").slice(-4).join("\n"),
-    });
-    if (status === "fail" || status === "timeout") stopped = !keepGoing;
-  }
-
-  return { results };
-}
