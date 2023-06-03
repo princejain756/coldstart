@@ -174,3 +174,9 @@ export async function replay(steps, opts) {
       results.push({ ...step, status: "skip", why: cls.why });
       continue;
     }
+
+    const r = await runOnce(cmd, { cwd, env, timeoutMs: STEP_TIMEOUT });
+    let status;
+    if (r.timedOut) status = "timeout";
+    else if (r.code === 0) status = "ok";
+    else status = "fail";
