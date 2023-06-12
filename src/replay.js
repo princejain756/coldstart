@@ -180,3 +180,17 @@ export async function replay(steps, opts) {
     if (r.timedOut) status = "timeout";
     else if (r.code === 0) status = "ok";
     else status = "fail";
+
+    results.push({
+      ...step,
+      cmd,
+      status,
+      ms: r.ms,
+      code: r.code,
+      tail: (r.err || r.out || "").trim().split("\n").slice(-4).join("\n"),
+    });
+    if (status === "fail" || status === "timeout") stopped = !keepGoing;
+  }
+
+  return { results, env };
+}
