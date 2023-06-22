@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { rmSync } from "node:fs";
 import { resolve } from "node:path";
-import { readReadme, extractSteps } from "../src/readme.js";
+import { readReadme, extractSteps, classifyStep } from "../src/readme.js";
 import { staticChecks } from "../src/checks.js";
 import { stageClone, replay } from "../src/replay.js";
 
@@ -59,7 +59,11 @@ try {
   const findings = staticChecks(cloneDir, steps);
   let results = [];
   if (!args.onlyStatic) {
-    ({ results } = await replay(steps, { cloneDir, keepGoing: args.keepGoing }));
+    ({ results } = await replay(steps, {
+      cloneDir,
+      classifyStep,
+      keepGoing: args.keepGoing,
+    }));
   }
 
   console.log("");
@@ -83,7 +87,8 @@ try {
     console.log(`replay (${results.length} steps)`);
     results.forEach((r, i) => {
       const ms = r.ms != null ? `${r.ms}ms` : "";
-      const why = r.why ? `  (${r.why})` : "";
+      let why = r.why ? `  (${r.why})` : "";
+      if (r.status === "env") why = `  (${r.value} set for later steps)`;
       console.log(
         `  ${String(i + 1).padStart(2)} ${r.status.padEnd(4)} ${ms.padStart(7)} ${r.cmd}${why}`
       );
