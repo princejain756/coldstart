@@ -29,8 +29,10 @@ npx coldstart-cli <git-url>    # or straight from GitHub
    came from so the report can say where a command lives.
 3. **Static checks** against the clean clone: missing scripts, missing
    referenced files.
-4. **Replays each command** in order, in the clone, and stops at the first
-   one that exits non-zero.
+4. **Replays each command** in order. `export` and `cd` steps update the
+   session for later steps, so "set this, then run that" sequences work.
+   Steps that would mutate your machine (`sudo`, `brew install`, a global
+   `npm i -g`) or that need interactive input are skipped with a note.
 5. **Verdict**: PASSES, RUNS-with-flags, or BROKEN at the step where a new
    user hits the wall, with the last lines of real output.
 
@@ -42,8 +44,8 @@ static checks (against the clean clone)
   flag  `npm run start` but package.json has no "start" script (has: build, test)  [line 7]
 
 replay (3 steps)
-   1 ok     502ms npm install
-   2 fail   200ms npm run start
+   1 PASS   502ms npm install
+   2 FAIL   200ms npm run start
    3 skip         npm run build  (after failure)
 
 verdict: BROKEN at step 2 - a new user following your README hits a wall there.
