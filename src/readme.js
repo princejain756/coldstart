@@ -120,3 +120,13 @@ export function extractSteps(markdown) {
     fence.push(line);
   });
   if (inFence) flush();
+
+  // Prefer steps inside quickstart-ish sections; fall back to tagged shell
+  // blocks anywhere, then to every shell-looking block.
+  const inQuickstart = steps.filter(
+    (s) => QUICKSTART_RE.test(s.heading) || (!s.heading && s.tagged)
+  );
+  if (inQuickstart.length) return { steps: inQuickstart, sections };
+  const tagged = steps.filter((s) => s.tagged);
+  if (tagged.length) return { steps: tagged, sections };
+  return { steps, sections };
