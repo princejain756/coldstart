@@ -130,3 +130,12 @@ export function extractSteps(markdown) {
   const tagged = steps.filter((s) => s.tagged);
   if (tagged.length) return { steps: tagged, sections };
   return { steps, sections };
+}
+
+export function readReadme(dir) {
+  const name = findReadme(dir);
+  if (!name) return null;
+  return { name, text: readFileSync(join(dir, name), "utf8") };
+}
+
+// Commands that should not be auto-replayed: they'd mutate the host, ask for
