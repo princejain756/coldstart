@@ -139,3 +139,12 @@ export function readReadme(dir) {
 }
 
 // Commands that should not be auto-replayed: they'd mutate the host, ask for
+// input we can't give, or only make sense outside a clone.
+const SKIP_RE =
+  /^\s*(sudo\b|open\b|code\b|xcode-select|ssh\b|git\s+push|npm\s+publish|gh\s+repo\s+create|docker\s+push|rm\s+-rf?\s*\/|say\b|osascript|npm\s+(i|install)\s+(-g|--global)\b|brew\s+install\b|brew\s+services\b)/;
+const INTERACTIVE_HINT = /create-(next|vite|react|expo|remix|nuxt|svelte)-app|npm\s+init|yarn\s+create|pnpm\s+create|read\s+-/;
+
+// `git clone <url> && cd <repo>` at the top of a README re-fetches remote
+// state - coldstart already staged the committed clone, so cloning the repo
+// itself is a no-op. Sibling-repo clones still run for real.
+const CLONE_SELF_RE = /^\s*git\s+clone\s+(?:-\S+\s+)*(\S+)/;
