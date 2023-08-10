@@ -148,3 +148,18 @@ const INTERACTIVE_HINT = /create-(next|vite|react|expo|remix|nuxt|svelte)-app|np
 // state - coldstart already staged the committed clone, so cloning the repo
 // itself is a no-op. Sibling-repo clones still run for real.
 const CLONE_SELF_RE = /^\s*git\s+clone\s+(?:-\S+\s+)*(\S+)/;
+export function classifyStep(cmd, repoName = null) {
+  if (SKIP_RE.test(cmd)) return { run: false, why: "host-side command" };
+  const cloneTarget = cmd.match(CLONE_SELF_RE)?.[1];
+  if (
+    cloneTarget &&
+    repoName &&
+    cloneTarget
+      .replace(/\/+$/, "")
+      .split("/")
+      .pop()
+      .replace(/\.git$/, "") === repoName
+  )
+    return { run: false, why: "repo already cloned" };
+  if (INTERACTIVE_HINT.test(cmd)) return { run: false, why: "interactive" };
+  return { run: true };
