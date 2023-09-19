@@ -1,7 +1,7 @@
 import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, cpSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, isAbsolute } from "node:path";
 
 const IGNORED_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".venv", "venv",
@@ -63,6 +63,8 @@ const ASSIGN_RE =
   /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(("([^"]*)")|('([^']*)')|[^\s]+)\s*$/;
 const CD_RE = /^cd\s+([^\s;&|]+)\s*$/;
 const CD_THEN_RE = /^cd\s+([^\s;&|]+)\s*(?:&&|;)\s*(.+)$/;
+// KEY=VAL prefixes and sudo before the real command
+const LEAD_PREFIX_RE = /^(?:sudo\s+|[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*/;
 
 function expandVars(val, env) {
   return val.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (m, name) =>
@@ -79,32 +81,96 @@ function parseAssignment(cmd) {
   return { name: m[1], value: raw, singleQuoted: m[5] != null };
 }
 
-const STEP_TIMEOUT = 240_000;
+// 127 means "command not found" - but WHICH command matters. `npm run build`
+// propagating a missing vite is a broken README, `nix run` with no nix
+// installed is an environment gap. Path-like tokens (./scripts/x.sh) missing
+// are always repo failures, never env gaps.
+function missingBinary(cmd, output, exists) {
+  const rawFirst = cmd
+    .replace(LEAD_PREFIX_RE, "")
+    .match(/^(\S+)/)?.[1];
+  if (!rawFirst) return { first: "", firstMissing: false };
+  if (rawFirst.includes("/")) return { first: rawFirst, firstMissing: false };
+  const hits = [
+    ...output.matchAll(/([\w./~+-]+):\s*(?:command\s+)?not found/gi),
+  ];
+  const rawMissing = hits.at(-1)?.[1];
+  if (rawMissing && rawMissing.includes("/"))
+    return { first: rawFirst, missing: rawMissing, firstMissing: false };
+  const missing = rawMissing?.split("/").pop();
+  const firstMissing = missing ? missing === rawFirst : !exists(rawFirst);
+  return { first: rawFirst, missing, firstMissing };
+}
 
-// Run one shell command in the staged clone and report what happened.
-function runOnce(cmd, { cwd, env, timeoutMs }) {
+function hostExists(bin) {
+  const r = spawnSync("sh", ["-c", `command -v "$1"`, "sh", bin], {
+    stdio: "pipe",
+  });
+  return r.status === 0;
+}
+
+// live host processes, reaped on SIGINT/SIGTERM. detached children get
+// their own process group (-pid); plain children are killed directly.
+const liveProcs = new Set();
+
+function reapLive() {
+  for (const proc of liveProcs) {
+    try {
+      if (proc.pid) process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      try { proc.kill("SIGKILL"); } catch {}
+    }
+  }
+  liveProcs.clear();
+}
+
+function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
   return new Promise((resolveP) => {
     const t0 = Date.now();
+    // detached: own process group, so a timeout can kill the server the
+    // command spawned, not just the sh wrapper
     const proc = spawn("sh", ["-c", cmd], {
       cwd,
       env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
     });
+    liveProcs.add(proc);
+    const drop = () => liveProcs.delete(proc);
+    // answer "y" once so npx-style install prompts behave like a real user
+    // pressing enter; stdin then closes so nothing blocks on it.
+    // a step that exits before we write raises EPIPE on the socket -
+    // unhandled, that kills the whole run
+    proc.stdin.on("error", () => {});
+    proc.stdin.write("y\n");
+    proc.stdin.end();
     let out = "";
     let err = "";
     let done = false;
     const finish = (r) => {
       if (done) return;
       done = true;
+      drop();
       clearTimeout(timer);
       resolveP({ ...r, out, err, ms: Date.now() - t0 });
     };
     proc.stdout.on("data", (d) => (out += d));
     proc.stderr.on("data", (d) => (err += d));
     const timer = setTimeout(() => {
+      if (keepAlive) {
+        // servers stay up so later steps (curl localhost:...) can hit them;
+        // the process group is reaped on transition or when the replay ends
+        try { proc.unref(); } catch {}
+        drop();
+        onOrphan?.(proc.pid);
+        finish({ code: null, timedOut: true });
+        return;
+      }
       try {
-        proc.kill("SIGKILL");
-      } catch {}
+        process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        try { proc.kill("SIGKILL"); } catch {}
+      }
       finish({ code: null, timedOut: true });
     }, timeoutMs);
     proc.on("close", (code) => finish({ code, timedOut: false }));
@@ -112,8 +178,17 @@ function runOnce(cmd, { cwd, env, timeoutMs }) {
   });
 }
 
+const SERVER_TIMEOUT = 15_000;
+const STEP_TIMEOUT = 240_000;
+
 export async function replay(steps, opts) {
-  const { cloneDir, classifyStep, keepGoing = false } = opts;
+  const {
+    cloneDir,
+    isServerish,
+    classifyStep,
+    keepGoing = false,
+    repoName = null,
+  } = opts;
 
   // `export KEY=value` steps build a session env that later steps inherit,
   // which is how a README's "set this, then run that" sequence is meant to go
@@ -122,75 +197,15 @@ export async function replay(steps, opts) {
   const results = [];
   let stopped = false;
 
-  const doCd = (target) => {
-    const clean = target.replace(/^["']|["']$/g, "");
-    const next = resolve(cwd, clean);
-    const inside = next === cloneDir || next.startsWith(cloneDir + "/");
-    const finalDir = inside ? next : cloneDir;
-    const ok = existsSync(finalDir);
-    if (ok) cwd = finalDir;
-    return { ok, at: cwd.slice(cloneDir.length) || "/" };
+  // backgrounded servers get reaped so a second server can't EADDRINUSE on
+  // the first one's port
+  const daemons = [];
+  const reapDaemons = () => {
+    for (let i = daemons.length - 1; i >= 0; i--) {
+      const d = daemons[i];
+      try {
+        if (d.pid) process.kill(-d.pid, "SIGKILL");
+      } catch {}
+      daemons.splice(i, 1);
+    }
   };
-
-  for (const step of steps) {
-    let { cmd } = step;
-    if (stopped) {
-      results.push({ ...step, status: "skip", why: "after failure" });
-      continue;
-    }
-
-    const assign = parseAssignment(cmd);
-    if (assign) {
-      env[assign.name] = assign.singleQuoted
-        ? assign.value
-        : expandVars(assign.value, env);
-      results.push({ ...step, status: "env", value: assign.name });
-      continue;
-    }
-
-    // peel every leading `cd x &&` - `cd a && cd b && cmd` chains work
-    for (;;) {
-      const cdThen = cmd.match(CD_THEN_RE);
-      const cdOnly = cmd.match(CD_RE);
-      if (!cdThen && !cdOnly) break;
-      const { ok, at } = doCd((cdThen || cdOnly)[1]);
-      if (!ok) {
-        results.push({ ...step, status: "fail", why: "no such dir" });
-        stopped = !keepGoing;
-        cmd = null;
-        break;
-      }
-      results.push({ ...step, cmd: `cd ${(cdThen || cdOnly)[1]}`, status: "cd", why: at });
-      if (cdOnly) {
-        cmd = null;
-        break;
-      }
-      cmd = cdThen[2];
-    }
-    if (cmd === null) continue;
-
-    const cls = classifyStep(cmd);
-    if (!cls.run) {
-      results.push({ ...step, status: "skip", why: cls.why });
-      continue;
-    }
-
-    const r = await runOnce(cmd, { cwd, env, timeoutMs: STEP_TIMEOUT });
-    let status;
-    if (r.timedOut) status = "timeout";
-    else if (r.code === 0) status = "ok";
-    else status = "fail";
-
-    results.push({
-      ...step,
-      cmd,
-      status,
-      ms: r.ms,
-      code: r.code,
-      tail: (r.err || r.out || "").trim().split("\n").slice(-4).join("\n"),
-    });
-    if (status === "fail" || status === "timeout") stopped = !keepGoing;
-  }
-
-  return { results, env };
-}
