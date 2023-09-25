@@ -209,3 +209,11 @@ export async function replay(steps, opts) {
       daemons.splice(i, 1);
     }
   };
+
+  const onSig = () => {
+    reapLive();
+    reapDaemons();
+    process.exit(130);
+  };
+  process.once("SIGINT", onSig);
+  process.once("SIGTERM", onSig);
