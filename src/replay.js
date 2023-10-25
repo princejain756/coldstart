@@ -217,3 +217,16 @@ export async function replay(steps, opts) {
   };
   process.once("SIGINT", onSig);
   process.once("SIGTERM", onSig);
+
+  const doCd = (target) => {
+    const clean = target.replace(/^["']|["']$/g, "");
+    let next = isAbsolute(clean) ? clean : resolve(cwd, clean);
+    // `cd <repo>` at the top of a README means "into the repo you cloned" -
+    // our staged clone already IS that directory
+    if (!existsSync(next) && clean === repoName) next = cloneDir;
+    const inside = next === cloneDir || next.startsWith(cloneDir + "/");
+    const finalDir = inside ? next : cloneDir;
+    const ok = existsSync(finalDir);
+    if (ok) cwd = finalDir;
+    return { ok, at: cwd.slice(cloneDir.length) || "/" };
+  };
