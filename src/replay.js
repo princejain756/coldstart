@@ -230,3 +230,11 @@ export async function replay(steps, opts) {
     if (ok) cwd = finalDir;
     return { ok, at: cwd.slice(cloneDir.length) || "/" };
   };
+
+  try {
+    for (const step of steps) {
+      let { cmd } = step;
+      if (stopped) {
+        results.push({ ...step, status: "skip", why: "after failure" });
+        continue;
+      }
