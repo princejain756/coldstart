@@ -238,3 +238,12 @@ export async function replay(steps, opts) {
         results.push({ ...step, status: "skip", why: "after failure" });
         continue;
       }
+
+      const assign = parseAssignment(cmd);
+      if (assign) {
+        env[assign.name] = assign.singleQuoted
+          ? assign.value
+          : expandVars(assign.value, env);
+        results.push({ ...step, status: "env", value: assign.name });
+        continue;
+      }
