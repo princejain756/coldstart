@@ -268,3 +268,9 @@ export async function replay(steps, opts) {
         cmd = cdThen[2];
       }
       if (cmd === null) continue;
+
+      const cls = classifyStep(cmd, repoName);
+      if (!cls.run) {
+        results.push({ ...step, status: "skip", why: cls.why });
+        continue;
+      }
