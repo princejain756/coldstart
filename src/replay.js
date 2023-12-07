@@ -274,3 +274,16 @@ export async function replay(steps, opts) {
         results.push({ ...step, status: "skip", why: cls.why });
         continue;
       }
+
+      const serverish = isServerish(cmd);
+      // a second server replaces the first (dev -> start would EADDRINUSE on
+      // the same port)
+      if (serverish) reapDaemons();
+      const timeoutMs = serverish ? SERVER_TIMEOUT : STEP_TIMEOUT;
+      const r = await runOnce(cmd, {
+        cwd,
+        env,
+        timeoutMs,
+        keepAlive: serverish,
+        onOrphan: (pid) => daemons.push({ pid }),
+      });
