@@ -302,3 +302,23 @@ export async function replay(steps, opts) {
           why = `\`${first}\` not installed on this machine`;
         }
       } else status = "fail";
+
+      results.push({
+        ...step,
+        cmd,
+        status,
+        ms: r.ms,
+        code: r.code,
+        tail: (r.err || r.out || "").trim().split("\n").slice(-4).join("\n"),
+        serverish,
+        why,
+      });
+      if (status === "fail" || status === "timeout") stopped = !keepGoing;
+    }
+  } finally {
+    process.removeListener("SIGINT", onSig);
+    process.removeListener("SIGTERM", onSig);
+    reapDaemons();
+  }
+  return { results, env };
+}
