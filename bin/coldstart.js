@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import { rmSync } from "node:fs";
-import { resolve } from "node:path";
-import { readReadme, extractSteps, classifyStep } from "../src/readme.js";
+import { basename, resolve } from "node:path";
+import {
+  readReadme,
+  extractSteps,
+  classifyStep,
+  isServerish,
+} from "../src/readme.js";
 import { staticChecks } from "../src/checks.js";
 import { stageClone, replay } from "../src/replay.js";
 
@@ -14,25 +19,41 @@ usage:
 options:
   --only-static   run the checks, skip executing anything
   --keep-going    don't stop at the first failure
+  --json          machine-readable report
+  --quiet         only the verdict line
   -h, --help
 `;
 
-const args = { target: null, onlyStatic: false, keepGoing: false };
-const argv = process.argv.slice(2);
-for (const a of argv) {
-  if (a === "--help" || a === "-h") {
-    console.log(HELP);
-    process.exit(0);
-  } else if (a === "--only-static") args.onlyStatic = true;
-  else if (a === "--keep-going") args.keepGoing = true;
-  else if (!a.startsWith("-") && !args.target) args.target = a;
-  else {
-    console.error(`unknown flag: ${a}`);
-    process.exit(2);
+function parseArgs(argv) {
+  const o = { target: null, onlyStatic: false, keepGoing: false, json: false, quiet: false };
+  for (const a of argv) {
+    if (a === "--help" || a === "-h") return { help: true };
+    if (a === "--only-static") o.onlyStatic = true;
+    else if (a === "--keep-going") o.keepGoing = true;
+    else if (a === "--json") o.json = true;
+    else if (a === "--quiet" || a === "-q") o.quiet = true;
+    else if (!a.startsWith("-") && !o.target) o.target = a;
+    else {
+      console.error(`unknown flag: ${a}`);
+      process.exit(2);
+    }
   }
+  return o;
+}
+
+const args = parseArgs(process.argv.slice(2));
+if (args.help) {
+  console.log(HELP);
+  process.exit(0);
 }
 
 const target = args.target ?? process.cwd();
+// resolve local paths first: basename(".") is "" and would break both the
+// `cd <repo>` shorthand and self-clone detection
+const isUrl = /^(https?:\/\/|git@|ssh:\/\/)/.test(target);
+const repoName = basename(
+  (isUrl ? target : resolve(target)).replace(/\/+$/, "")
+).replace(/\.git$/, "");
 let staged;
 try {
   staged = stageClone(target);
@@ -42,6 +63,13 @@ try {
 }
 
 const { dir: cloneDir, tmp, how } = staged;
+// exit handler covers every path, including the process.exit calls below
+// that would skip the finally block
+process.on("exit", () => {
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {}
+});
 try {
   const readme = readReadme(cloneDir);
   if (!readme) {
@@ -61,73 +89,55 @@ try {
   if (!args.onlyStatic) {
     ({ results } = await replay(steps, {
       cloneDir,
+      isServerish,
       classifyStep,
       keepGoing: args.keepGoing,
+      repoName,
     }));
   }
 
-  console.log("");
-  console.log("coldstart - fresh-clone replay");
-  console.log(`repo: ${resolve(target)}   readme: ${readme.name}   staged: ${how}`);
-  if (staged.uncommitted) {
-    console.log(
-      `note: replayed committed state; ${staged.uncommitted} uncommitted file(s) not included`
-    );
-  }
-  console.log("");
-
-  console.log("static checks (against the clean clone)");
-  for (const f of findings) {
-    const where = f.line ? `  [line ${f.line}]` : "";
-    console.log(`  ${f.level.padEnd(5)} ${f.msg}${where}`);
-  }
-  console.log("");
-
-  if (results.length) {
-    console.log(`replay (${results.length} steps)`);
-    results.forEach((r, i) => {
-      const ms = r.ms != null ? `${r.ms}ms` : "";
-      let why = r.why ? `  (${r.why})` : "";
-      if (r.status === "env") why = `  (${r.value} set for later steps)`;
-      console.log(
-        `  ${String(i + 1).padStart(2)} ${r.status.padEnd(4)} ${ms.padStart(7)} ${r.cmd}${why}`
-      );
-    });
-  }
-
-  const firstFail = results.find((r) => r.status === "fail" || r.status === "timeout");
-  if (firstFail?.tail) {
-    console.log("");
-    console.log("  last output lines:");
-    for (const l of firstFail.tail.split("\n")) console.log(`    ${l}`);
-  }
-  console.log("");
+  const broken = results.some((r) => r.status === "fail" || r.status === "timeout");
   const flags = findings.filter((f) => f.level === "flag").length;
-  if (!results.length) {
+
+  if (args.json) {
     console.log(
-      flags
-        ? `verdict: STATIC ONLY - ${flags} flag(s) found, nothing executed.`
-        : "verdict: STATIC ONLY - clean, nothing executed."
+      JSON.stringify(
+        {
+          target,
+          readme: readme.name,
+          staged: how,
+          findings,
+          results: results.map(({ tail, ...r }) => r),
+          verdict: broken ? "broken" : flags ? "runs-with-flags" : "passes",
+        },
+        null,
+        2
+      )
     );
-  } else if (firstFail) {
-    const idx = results.indexOf(firstFail) + 1;
+  } else if (args.quiet) {
     console.log(
-      `verdict: BROKEN at step ${idx} - a new user following your README hits a wall there.`
-    );
-  } else if (flags) {
-    console.log(
-      `verdict: RUNS, but ${flags} static flag(s) - the steps ran on this machine yet may still trip a stranger.`
+      broken
+        ? `BROKEN at step ${results.findIndex((r) => r.status === "fail" || r.status === "timeout") + 1}`
+        : flags
+          ? `RUNS, ${flags} flags`
+          : "PASSES"
     );
   } else {
+    console.log("");
+    console.log("coldstart - fresh-clone replay");
     console.log(
-      `verdict: PASSES - ${results.length}/${results.length} steps ran clean in a fresh clone.`
+      `repo: ${repoName || target}   readme: ${readme.name}   staged: ${how}   env: host shell`
     );
-  }
-  console.log("");
-  // static-only mode fails on flags too - that's the whole point of the gate
-  process.exit(firstFail || (args.onlyStatic && flags) ? 1 : 0);
-} finally {
-  try {
-    rmSync(tmp, { recursive: true, force: true });
-  } catch {}
-}
+    if (staged.uncommitted) {
+      console.log(
+        `note: replayed committed state; ${staged.uncommitted} uncommitted file(s) not included`
+      );
+    }
+    console.log("");
+
+    console.log("static checks (against the clean clone)");
+    for (const f of findings) {
+      const where = f.line ? `  [line ${f.line}]` : "";
+      console.log(`  ${f.level.padEnd(5)} ${f.msg}${where}`);
+    }
+    console.log("");
