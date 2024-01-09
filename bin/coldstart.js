@@ -141,3 +141,16 @@ try {
       console.log(`  ${f.level.padEnd(5)} ${f.msg}${where}`);
     }
     console.log("");
+
+    if (results.length) {
+      console.log(`replay (${results.length} steps)`);
+      results.forEach((r, i) => {
+        const ms = r.ms != null ? `${r.ms}ms` : "";
+        let why = r.why ? `  (${r.why})` : "";
+        if (r.status === "env") why = `  (${r.value} set for later steps)`;
+        if (r.status === "started") why = "  (server, still running at 15s - assumed good)";
+        console.log(
+          `  ${String(i + 1).padStart(2)} ${r.status.padEnd(4)} ${ms.padStart(7)} ${r.cmd}${why}`
+        );
+      });
+    }
