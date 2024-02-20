@@ -186,3 +186,8 @@ try {
   }
   // static-only mode fails on flags too - that's the whole point of the gate
   process.exit(broken || (args.onlyStatic && flags) ? 1 : 0);
+} finally {
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {}
+}
