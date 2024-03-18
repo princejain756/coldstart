@@ -3,12 +3,12 @@
 **Does your repo pass a fresh clone?**
 
 Every README makes a promise: run these commands and it works. coldstart
-checks the promise. It copies your repo into a clean temp dir, runs static
+checks the promise. It clones your repo into a clean temp dir, runs static
 checks against what actually ships, then replays the commands your README
 tells a stranger to run.
 
 ```bash
-npx coldstart-cli              # the repo in the current directory
+npx coldstart-cli              # replay the repo in the current directory
 npx coldstart-cli <path>       # a local repo
 npx coldstart-cli <git-url>    # or straight from GitHub
 ```
@@ -22,23 +22,28 @@ npx coldstart-cli <git-url>    # or straight from GitHub
 
 ## What it does
 
-1. **Stages the committed state** into a temp dir, so `node_modules` and
-   `.env` files can't hide the breakage. Git repos are cloned at depth 1;
-   anything else is copied minus the usual build folders.
-2. **Parses the README** for shell blocks, keeping the heading each step
-   came from so the report can say where a command lives.
+1. **Clones the committed state** into a temp dir, so `node_modules` and
+   `.env` files can't hide the breakage. Non-git dirs get copied minus the
+   usual ignored folders.
+2. **Parses the README** for shell blocks in Install / Quickstart / Usage
+   sections. Pasted example output and placeholder lines get filtered out.
 3. **Static checks** against the clean clone: missing scripts, missing
    referenced files.
 4. **Replays each command** in order. `export` and `cd` steps update the
    session for later steps, so "set this, then run that" sequences work.
-   Steps that would mutate your machine (`sudo`, `brew install`, a global
-   `npm i -g`) or that need interactive input are skipped with a note.
+   Dev servers get a 15s startup window and stay running so later steps can
+   hit them. Steps that would mutate your machine (`sudo`, `brew install`, a
+   global `npm i -g`) or that need interactive input are skipped with a note.
+   A command that only failed because the tool isn't on this machine is
+   reported as a skip, not a README failure.
+   `git clone <this-repo>` at the top of a quickstart is a no-op - the clone
+   is already staged - and `cd <repo>` re-enters it.
 5. **Verdict**: PASSES, RUNS-with-flags, or BROKEN at the step where a new
    user hits the wall, with the last lines of real output.
 
 ```
 coldstart - fresh-clone replay
-repo: broken-quickstart   readme: README.md   staged: copy of working dir (not a git repo)
+repo: broken-quickstart   readme: README.md   staged: copy of working dir (not a git repo)   env: host shell
 
 static checks (against the clean clone)
   flag  `npm run start` but package.json has no "start" script (has: build, test)  [line 7]
@@ -59,6 +64,11 @@ makes that mode a usable gate: no commands executed, just the checks.
 ```
 --only-static   run the checks, skip executing anything
 --keep-going    don't stop at the first failure
+--json          machine-readable report
+--quiet         just the verdict line
 ```
 
-MIT
+## Honest limits
+
+- **Host replay shares your env.** Tools you have installed mask missing
+  prerequisites a stranger wouldn't have. Host mode is the fast check.
