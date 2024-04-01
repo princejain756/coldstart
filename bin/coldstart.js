@@ -9,6 +9,7 @@ import {
 } from "../src/readme.js";
 import { staticChecks } from "../src/checks.js";
 import { stageClone, replay } from "../src/replay.js";
+import { render } from "../src/report.js";
 
 const HELP = `coldstart - does your repo pass a fresh clone?
 
@@ -62,7 +63,7 @@ try {
   process.exit(2);
 }
 
-const { dir: cloneDir, tmp, how } = staged;
+const { dir: cloneDir, tmp } = staged;
 // exit handler covers every path, including the process.exit calls below
 // that would skip the finally block
 process.on("exit", () => {
@@ -105,7 +106,7 @@ try {
         {
           target,
           readme: readme.name,
-          staged: how,
+          staged: staged.how,
           findings,
           results: results.map(({ tail, ...r }) => r),
           verdict: broken ? "broken" : flags ? "runs-with-flags" : "passes",
@@ -123,66 +124,16 @@ try {
           : "PASSES"
     );
   } else {
-    console.log("");
-    console.log("coldstart - fresh-clone replay");
-    console.log(
-      `repo: ${repoName || target}   readme: ${readme.name}   staged: ${how}   env: host shell`
+    process.stdout.write(
+      render({
+        target: repoName || target,
+        readmeName: readme.name,
+        how: staged.how,
+        uncommitted: staged.uncommitted,
+        findings,
+        results,
+      })
     );
-    if (staged.uncommitted) {
-      console.log(
-        `note: replayed committed state; ${staged.uncommitted} uncommitted file(s) not included`
-      );
-    }
-    console.log("");
-
-    console.log("static checks (against the clean clone)");
-    for (const f of findings) {
-      const where = f.line ? `  [line ${f.line}]` : "";
-      console.log(`  ${f.level.padEnd(5)} ${f.msg}${where}`);
-    }
-    console.log("");
-
-    if (results.length) {
-      console.log(`replay (${results.length} steps)`);
-      results.forEach((r, i) => {
-        const ms = r.ms != null ? `${r.ms}ms` : "";
-        let why = r.why ? `  (${r.why})` : "";
-        if (r.status === "env") why = `  (${r.value} set for later steps)`;
-        if (r.status === "started") why = "  (server, still running at 15s - assumed good)";
-        console.log(
-          `  ${String(i + 1).padStart(2)} ${r.status.padEnd(4)} ${ms.padStart(7)} ${r.cmd}${why}`
-        );
-      });
-    }
-
-    const firstFail = results.find((r) => r.status === "fail" || r.status === "timeout");
-    if (firstFail?.tail) {
-      console.log("");
-      console.log("  last output lines:");
-      for (const l of firstFail.tail.split("\n")) console.log(`    ${l}`);
-    }
-    console.log("");
-    if (!results.length) {
-      console.log(
-        flags
-          ? `verdict: STATIC ONLY - ${flags} flag(s) found, nothing executed.`
-          : "verdict: STATIC ONLY - clean, nothing executed."
-      );
-    } else if (firstFail) {
-      const idx = results.indexOf(firstFail) + 1;
-      console.log(
-        `verdict: BROKEN at step ${idx} - a new user following your README hits a wall there.`
-      );
-    } else if (flags) {
-      console.log(
-        `verdict: RUNS, but ${flags} static flag(s) - the steps ran on this machine yet may still trip a stranger.`
-      );
-    } else {
-      console.log(
-        `verdict: PASSES - ${results.length}/${results.length} steps ran clean in a fresh clone.`
-      );
-    }
-    console.log("");
   }
   // static-only mode fails on flags too - that's the whole point of the gate
   process.exit(broken || (args.onlyStatic && flags) ? 1 : 0);
