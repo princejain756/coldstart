@@ -53,11 +53,36 @@ replay (3 steps)
    2 FAIL   200ms npm run start
    3 skip         npm run build  (after failure)
 
+  last output lines:
+    npm error
+    npm error To see a list of scripts, run:
+    npm error   npm run
+
 verdict: BROKEN at step 2 - a new user following your README hits a wall there.
 ```
 
-The exit code is non-zero on BROKEN - and on flags in `--only-static`, which
-makes that mode a usable gate: no commands executed, just the checks.
+The report is colourised on a TTY and plain when piped, so it reads the same
+in a log. The exit code is non-zero on BROKEN - and on flags in
+`--only-static`, which makes that mode a usable gate: no commands executed,
+just the checks.
+
+## Example
+
+`examples/broken-quickstart` ships a README that tells the user to
+`npm run start` when the script is called `build`:
+
+```
+  flag  `npm run start` but package.json has no "start" script (has: build, test)
+
+   1 PASS   507ms npm install
+   2 FAIL   211ms npm run start
+   3 skip         npm run build  (after failure)
+
+verdict: BROKEN at step 2 - a new user following your README hits a wall there.
+```
+
+The static check caught it before a single command ran. The replay confirms
+it with the real npm error.
 
 ## Options
 
@@ -67,15 +92,3 @@ makes that mode a usable gate: no commands executed, just the checks.
 --json          machine-readable report
 --quiet         just the verdict line
 ```
-
-## Honest limits
-
-- **Host replay shares your env.** Tools you have installed mask missing
-  prerequisites a stranger wouldn't have. Host mode is the fast check.
-- **POSIX shells only.** Commands run through `sh -c`; Windows READMEs with
-  PowerShell blocks are detected but not replayed.
-- **It replays what the README literally says.** A quickstart that works
-  but is badly explained still passes; the docs-audit part is limited to
-  the static checks.
-
-MIT
