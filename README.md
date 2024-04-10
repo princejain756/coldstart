@@ -92,3 +92,15 @@ it with the real npm error.
 --json          machine-readable report
 --quiet         just the verdict line
 ```
+
+## Honest limits
+
+- **Host replay shares your env.** Tools you have installed mask missing
+  prerequisites a stranger wouldn't have. Host mode is the fast check.
+- **POSIX shells only.** Commands run through `sh -c`; Windows READMEs with
+  PowerShell blocks are detected but not replayed.
+- **It replays what the README literally says.** A quickstart that works
+  but is badly explained still passes; the docs-audit part is limited to
+  the static checks.
+
+MIT
