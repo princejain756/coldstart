@@ -6,6 +6,9 @@
   "bin": {
     "coldstart-cli": "bin/coldstart.js"
   },
+  "scripts": {
+    "selfcheck": "node test/selfcheck.mjs"
+  },
   "engines": {
     "node": ">=18"
   },
