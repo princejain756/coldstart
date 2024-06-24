@@ -13,6 +13,8 @@ npx coldstart-cli <path>       # a local repo
 npx coldstart-cli <git-url>    # or straight from GitHub
 ```
 
+![coldstart replaying a broken quickstart](demo.png)
+
 ## What it catches
 
 - `npm run build` when package.json has no `build` script (flagged before
@@ -84,6 +86,17 @@ verdict: BROKEN at step 2 - a new user following your README hits a wall there.
 The static check caught it before a single command ran. The replay confirms
 it with the real npm error.
 
+## Development
+
+```bash
+npm run selfcheck     # fixture repos in a temp dir, real replays
+```
+
+`test/selfcheck.mjs` builds throwaway git repos whose READMEs break at a
+known step, runs the CLI against them, and asserts the verdict, the failing
+step, and the exit code. It is the same path a user takes - no mocking of
+the runner.
+
 ## Options
 
 ```
@@ -99,8 +112,3 @@ it with the real npm error.
   prerequisites a stranger wouldn't have. Host mode is the fast check.
 - **POSIX shells only.** Commands run through `sh -c`; Windows READMEs with
   PowerShell blocks are detected but not replayed.
-- **It replays what the README literally says.** A quickstart that works
-  but is badly explained still passes; the docs-audit part is limited to
-  the static checks.
-
-MIT
