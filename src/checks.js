@@ -1,5 +1,36 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { execFileSync } from "node:child_process";
+
+const PM_FILES = {
+  "pnpm-lock.yaml": "pnpm",
+  "yarn.lock": "yarn",
+  "bun.lockb": "bun",
+  "bun.lock": "bun",
+  "package-lock.json": "npm",
+  "npm-shrinkwrap.json": "npm",
+};
+
+const ENV_RE = /(^|\s)(export\s+)?[A-Z][A-Z0-9_]{2,}=/g;
+// paths a README treats as repo files: ./script.sh, configs, requirements
+const FILE_ARG_RE =
+  /(?:^|\s)(\.\/[\w./-]+|[\w.-]+\/(?:requirements\.txt|docker-compose[\w.-]*\.ya?ml|Makefile|\.env[\w.-]*))\b/g;
+// file args that are really "bring your own" inputs, not repo assets
+const USER_INPUT_RE =
+  /\.(jpe?g|png|gif|webp|mp3|mp4|mov|wav|pdf|docx?|xlsx?|pptx?|csv|tsv|zip|tar|gz|sqlite|db|bin|dat)$/i;
+// exact segment matches only: "app" counts, "apps", "app.py", "app.main"
+// do not - those are real names
+const PLACEHOLDER_RE =
+  /^(my-app|myapp|your[-_]?app|your[-_]?project|example|sample|demo|foo|bar|baz|test[-_]?app|project|repo|app|website|site|input|file|path|name)$/i;
+
+function detectPackageManagers(dir) {
+  const found = [];
+  for (const [file, pm] of Object.entries(PM_FILES)) {
+    if (existsSync(join(dir, file))) found.push(pm);
+  }
+  if (existsSync(join(dir, "package.json")) && !found.length) found.push("npm");
+  return found;
+}
 
 function readPkgScripts(dir) {
   try {
@@ -11,75 +42,43 @@ function readPkgScripts(dir) {
   }
 }
 
-// `npm run build`, `yarn build`, `pnpm run test` - the script name is the
-// third token; `npm install` and friends are package-manager builtins.
-const PM_SCRIPT_RE =
-  /\b(npm|pnpm|yarn|bun)\s+(run\s+)?([a-zA-Z0-9:_-]+)(?=[\s;&|]|$)/g;
+function which(cmd) {
+  try {
+    execFileSync("sh", ["-c", 'command -v "$1"', "sh", cmd], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// lookahead keeps `bun index.ts` / `deno fmt` from matching as scripts
+const PM_CMD_RE =
+  /\b(npm|pnpm|yarn|bun|deno)\s+(run\s+|task\s+)?([a-zA-Z0-9:_-]+)(?=[\s;&|]|$)/g;
+// pm built-ins never live in package.json scripts
 const PM_BUILTINS = new Set([
   "install", "i", "ci", "add", "remove", "rm", "uninstall", "unlink",
   "test", "exec", "dlx", "x", "create", "init", "audit", "outdated",
   "publish", "login", "logout", "whoami", "run", "link", "ln", "rebuild",
   "pack", "version", "cache", "config", "store", "update", "up", "upgrade",
   "why", "list", "ls", "info", "view", "doctor", "completion", "env",
-  "node", "bin", "root", "help", "workspaces",
+  "node", "bin", "root", "help", "workspaces", "fmt", "lint", "compile",
+  "task", "bundle", "install-global", "dedupe", "prune", "patch",
 ]);
+// npm only runs scripts via run/start/test/stop/restart; deno via task;
+// everything else for npm/deno is a builtin or a file argument
+const PM_SCRIPT_STYLE = { npm: "explicit", deno: "task", bun: "run", pnpm: "bare", yarn: "bare" };
 
-// paths a README treats as repo files: ./script.sh, configs, requirements
-const FILE_ARG_RE =
-  /(?:^|\s)(\.\/[\w./-]+|[\w.-]+\/(?:requirements\.txt|docker-compose[\w.-]*\.ya?ml|Makefile|\.env[\w.-]*))\b/g;
+// a required arg in a step that is a placeholder or a file the user supplies,
+// not something the repo ships - the step can't run meaningfully without it
+const KNOWN_ASSET_RE =
+  /^(requirements\.txt|docker-compose[\w.-]*\.ya?ml|Makefile|\.env\.?\w*|package\.json|tsconfig\.json|setup\.py|pyproject\.toml|go\.mod|Cargo\.toml|Gemfile|composer\.json)$/i;
 
-// Static checks run against the clean clone, before any command executes.
-// Everything here is a promise the README makes that the repo does not keep.
-export function staticChecks(dir, steps) {
-  const findings = [];
-  const scripts = readPkgScripts(dir);
-  const checkedScripts = new Set();
-  const missingFiles = new Map();
+// commands that CREATE their path arguments - a missing target is the point
+const CREATES_ARG_RE = /^\s*(mkdir|touch|git\s+clone|cp\b|mv\b|ln\b|tee\b|cat\s*>)/;
 
-  for (const { cmd, line } of steps) {
-    for (const m of cmd.matchAll(PM_SCRIPT_RE)) {
-      const [full, pm, runKw, sub] = m;
-      if (!sub || PM_BUILTINS.has(sub)) continue;
-      // npm only runs scripts through `run`/start/test; the rest is a file arg
-      const isScript =
-        runKw === "run " ||
-        (pm === "npm" && ["start", "test", "stop", "restart"].includes(sub)) ||
-        (pm !== "npm" && runKw === undefined);
-      if (!isScript || !scripts) continue;
-      if (!scripts.includes(sub) && !checkedScripts.has(sub)) {
-        checkedScripts.add(sub);
-        findings.push({
-          level: "flag",
-          line,
-          msg: `\`${full.trim()}\` but package.json has no "${sub}" script (has: ${scripts.slice(0, 8).join(", ") || "none"})`,
-        });
-      }
-    }
-
-    for (const m of cmd.matchAll(FILE_ARG_RE)) {
-      const p = m[1].replace(/^(\.\/)/, "");
-      if (p.includes("..")) continue;
-      // `./name.ext` with no directory part is usually a usage example
-      const looksLikeAsset =
-        p.includes("/") ||
-        /^(requirements\.txt|docker-compose[\w.-]*\.ya?ml|Makefile|\.env|\.env\.\w+)$/i.test(
-          p
-        );
-      if (!looksLikeAsset) continue;
-      if (!existsSync(join(dir, p)) && !missingFiles.has(p)) missingFiles.set(p, line);
-    }
-  }
-
-  for (const [file, line] of missingFiles) {
-    findings.push({
-      level: "flag",
-      line,
-      msg: `README references \`${file}\` but it does not exist in the repo`,
-    });
-  }
-
-  if (!findings.length) {
-    findings.push({ level: "ok", msg: "no static problems found" });
-  }
-  return findings;
-}
+// tokens that introduce the thing being run - never treat them as path args:
+// token 0 (the command), the script after `pm run`, the target after
+// make/just/task, the tag after -t, the branch after -b/checkout
+const RUNNER_RE = /^(npm|pnpm|yarn|bun|deno|npx|bunx|make|just|task|mise|cargo|go|mvn|gradle|rake|bundle|mix|dotnet|cmake)$/i;
+const GITISH_RE = /^(git|gh|glab|hub|tea)$/;
+const HOSTISH_RE = /^(localhost|127\.|0\.0\.0\.0|0x|.*\.(com|org|net|io|dev|app|local|sh|ai|co|xyz|me)|\d+\.\d+)/i;
