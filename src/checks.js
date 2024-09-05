@@ -82,3 +82,38 @@ const CREATES_ARG_RE = /^\s*(mkdir|touch|git\s+clone|cp\b|mv\b|ln\b|tee\b|cat\s*
 const RUNNER_RE = /^(npm|pnpm|yarn|bun|deno|npx|bunx|make|just|task|mise|cargo|go|mvn|gradle|rake|bundle|mix|dotnet|cmake)$/i;
 const GITISH_RE = /^(git|gh|glab|hub|tea)$/;
 const HOSTISH_RE = /^(localhost|127\.|0\.0\.0\.0|0x|.*\.(com|org|net|io|dev|app|local|sh|ai|co|xyz|me)|\d+\.\d+)/i;
+
+export function stepBlocker(dir, cmd) {
+  if (CREATES_ARG_RE.test(cmd)) return null;
+  const tokens = [...cmd.matchAll(/(?:^|\s)(\S+)/g)];
+  // indices to never treat as file args: the command itself, the script name
+  // after `pm run`, the target after make-style runners, flag values
+  const skipIdx = new Set();
+  let firstReal = 0;
+  while (
+    firstReal < tokens.length &&
+    /^(sudo|[A-Za-z_][A-Za-z0-9_]*=\S+|env)$/.test(tokens[firstReal][1])
+  )
+    firstReal++;
+  if (firstReal < tokens.length) {
+    skipIdx.add(firstReal);
+    const verb = tokens[firstReal][1];
+    const next = tokens[firstReal + 1]?.[1];
+    if (RUNNER_RE.test(verb) && next && !next.startsWith("-")) {
+      // `pm run script` -> skip two words; `pm script` / `make target` -> one
+      skipIdx.add(next === "run" && tokens[firstReal + 2] ? firstReal + 2 : firstReal + 1);
+    }
+    if (GITISH_RE.test(verb)) {
+      for (let i = firstReal + 1; i < Math.min(firstReal + 4, tokens.length); i++) {
+        if (/^(checkout|switch|branch|clone|remote|merge|rebase|cherry-pick)$/.test(tokens[i][1])) {
+          if (tokens[i + 1]) skipIdx.add(i + 1);
+          break;
+        }
+      }
+    }
+  }
+  // flags that consume the next token as a value (--filter apps/web, -t tag)
+  const VALUE_FLAG_RE = /^(--filter|-F|--tag|-t|--branch|-b|--name|-n|--file|-f|--output|-o|--cwd|-C|--prefix|--context|-c|--target|--env|-e|--user|-u|--workdir|-w)$/;
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (VALUE_FLAG_RE.test(tokens[i][1])) skipIdx.add(i + 1);
+  }
