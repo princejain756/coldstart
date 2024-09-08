@@ -117,3 +117,12 @@ export function stepBlocker(dir, cmd) {
   for (let i = 0; i < tokens.length - 1; i++) {
     if (VALUE_FLAG_RE.test(tokens[i][1])) skipIdx.add(i + 1);
   }
+
+  // a bare `owner/repo` only means a repo slug when a clone-ish or
+  // package-runner command invites it - `localhost/health`, docker tags,
+  // git branches, and ./paths never count
+  const verbForSlug = tokens[firstReal]?.[1] ?? "";
+  const slugContext =
+    GITISH_RE.test(verbForSlug) && /\bclone\b/.test(cmd)
+      ? true
+      : /^(npx|bunx|pnpx|npm|pnpm|yarn|gh|hub|tea|glab|pipx?|uvx?)$/.test(verbForSlug);
