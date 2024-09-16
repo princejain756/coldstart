@@ -126,3 +126,14 @@ export function stepBlocker(dir, cmd) {
     GITISH_RE.test(verbForSlug) && /\bclone\b/.test(cmd)
       ? true
       : /^(npx|bunx|pnpx|npm|pnpm|yarn|gh|hub|tea|glab|pipx?|uvx?)$/.test(verbForSlug);
+
+  for (const m of tokens) {
+    if (skipIdx.has(tokens.indexOf(m))) continue;
+    let p = m[1].replace(/^['"(]/, "").replace(/[)>'"`,;]+$/, "");
+    if (!p || p.startsWith("-") || p.includes("=") || p.startsWith("$")) continue;
+    if (/[>|]\s*$/.test(cmd.slice(0, m.index))) continue;
+    const hadDotSlash = p.startsWith("./");
+    const bare = p.replace(/^\.\//, "");
+    if (p.startsWith("/") || p.includes("..") || !bare) continue;
+    if (existsSync(join(dir, bare)) || existsSync(join(dir, bare.split("/").pop()))) continue;
+    if (KNOWN_ASSET_RE.test(bare.split("/").pop())) continue; // real missing asset: let it fail
