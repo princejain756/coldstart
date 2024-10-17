@@ -137,3 +137,22 @@ export function stepBlocker(dir, cmd) {
     if (p.startsWith("/") || p.includes("..") || !bare) continue;
     if (existsSync(join(dir, bare)) || existsSync(join(dir, bare.split("/").pop()))) continue;
     if (KNOWN_ASSET_RE.test(bare.split("/").pop())) continue; // real missing asset: let it fail
+
+    const segs = bare.split("/");
+    const lastSeg = segs[segs.length - 1];
+    const hasExt = /\.[a-z0-9]+$/i.test(lastSeg);
+    // explicit ./paths are repo files - missing means the README is broken,
+    // never a "bring your own" skip
+    if (!hadDotSlash && !hasExt && segs.length === 2 && slugContext &&
+        /^[\w.-]+\/[\w.-]+$/.test(bare) && !HOSTISH_RE.test(segs[0])) {
+      return `needs a real repo/owner arg (\`${bare}\` is an example)`;
+    }
+    if (!hasExt && PLACEHOLDER_RE.test(segs[0])) {
+      return `needs your own path (\`${bare}\` is a placeholder)`;
+    }
+    if (USER_INPUT_RE.test(lastSeg)) return `needs your file \`${lastSeg}\``;
+    if (hadDotSlash && !bare.includes("/")) {
+      return `needs your own path (\`./${bare}\` isn't in the repo)`;
+    }
+  }
+  return null;
