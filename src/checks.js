@@ -156,3 +156,15 @@ export function stepBlocker(dir, cmd) {
     }
   }
   return null;
+}
+
+// Static checks run against the clean clone, before any command executes.
+export function staticChecks(dir, steps, opts = {}) {
+  const { repoName = null, docker = false } = opts;
+  const findings = [];
+  const pms = detectPackageManagers(dir);
+  const scripts = readPkgScripts(dir);
+  const envFiles = readdirSync(dir).filter((f) =>
+    /^\.env(\.example|\.sample|\.template|\.dist)?$/i.test(f)
+  );
+  const hasEnvExample = envFiles.some((f) => !/^\.env$/i.test(f));
