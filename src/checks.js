@@ -168,3 +168,10 @@ export function staticChecks(dir, steps, opts = {}) {
     /^\.env(\.example|\.sample|\.template|\.dist)?$/i.test(f)
   );
   const hasEnvExample = envFiles.some((f) => !/^\.env$/i.test(f));
+
+  const pmInReadme = new Set();
+  const envVars = new Set();
+  const checkedScripts = new Set();
+  const missingFiles = new Map();
+  let curDir = dir;
+  let curScripts = scripts;
