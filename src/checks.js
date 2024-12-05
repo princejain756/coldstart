@@ -175,3 +175,47 @@ export function staticChecks(dir, steps, opts = {}) {
   const missingFiles = new Map();
   let curDir = dir;
   let curScripts = scripts;
+
+  for (const { cmd, line, directive } of steps) {
+    if (directive?.ignore) continue; // author says this block is illustrative
+    // follow cd steps so script checks hit the right package.json (monorepos)
+    const cdTo = cmd.match(/^\s*cd\s+([^\s;&|]+)/)?.[1];
+    if (cdTo && !cdTo.startsWith("/") && !cdTo.includes("..")) {
+      // `cd <repoName>` right after `git clone` re-enters the staged clone
+      if (cdTo === repoName) {
+        curDir = dir;
+        curScripts = scripts;
+      } else if (existsSync(join(curDir, cdTo))) {
+        curDir = join(curDir, cdTo);
+        curScripts = readPkgScripts(curDir) ?? curScripts;
+      }
+    }
+    for (const m of cmd.matchAll(PM_CMD_RE)) {
+      const [full, pm, runKw, sub] = m;
+      pmInReadme.add(pm);
+      if (!sub) continue;
+      const style = PM_SCRIPT_STYLE[pm];
+      const isScript =
+        style === "bare" ||
+        (style === "task" && runKw === "task ") ||
+        (style === "explicit" &&
+          (runKw === "run " || ["start", "test", "stop", "restart"].includes(sub))) ||
+        (style === "run" && runKw === "run ");
+      const scriptName = sub;
+      if (
+        curScripts &&
+        isScript &&
+        !PM_BUILTINS.has(scriptName) &&
+        !curScripts.includes(scriptName)
+      ) {
+        const key = `${pm} ${scriptName}`;
+        if (!checkedScripts.has(key)) {
+          checkedScripts.add(key);
+          findings.push({
+            level: "flag",
+            line,
+            msg: `\`${full.trim()}\` but package.json has no "${scriptName}" script (has: ${curScripts.slice(0, 8).join(", ") || "none"})`,
+          });
+        }
+      }
+    }
