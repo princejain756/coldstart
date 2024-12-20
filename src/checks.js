@@ -219,3 +219,10 @@ export function staticChecks(dir, steps, opts = {}) {
         }
       }
     }
+
+    for (const m of cmd.matchAll(ENV_RE)) {
+      const name = cmd.slice(m.index).match(/[A-Z][A-Z0-9_]{2,}/)?.[0];
+      if (name && /KEY|TOKEN|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL|API/i.test(name)) {
+        envVars.add(name);
+      }
+    }
