@@ -226,3 +226,11 @@ export function staticChecks(dir, steps, opts = {}) {
         envVars.add(name);
       }
     }
+
+    if (/\|\s*(sudo\s+)?(ba|z)?sh\b/.test(cmd) && /curl|wget/.test(cmd)) {
+      findings.push({
+        level: "warn",
+        line,
+        msg: `pipes a remote script into a shell - runs on the user's machine, not the sandbox`,
+      });
+    }
