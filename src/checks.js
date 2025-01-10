@@ -234,3 +234,25 @@ export function staticChecks(dir, steps, opts = {}) {
         msg: `pipes a remote script into a shell - runs on the user's machine, not the sandbox`,
       });
     }
+
+    for (const m of cmd.matchAll(FILE_ARG_RE)) {
+      const p = m[1].replace(/^(\.\/)/, "");
+      if (p.includes("..") || PLACEHOLDER_RE.test(p)) continue;
+      // `./name.ext` with no directory part is usually a usage example, not a
+      // repo asset - only nested paths and known config names get flagged
+      const looksLikeAsset =
+        p.includes("/") ||
+        /^(requirements\.txt|docker-compose[\w.-]*\.ya?ml|Makefile|\.env|\.env\.\w+|package\.json|tsconfig\.json|setup\.py|pyproject\.toml|go\.mod|Cargo\.toml|Gemfile|composer\.json)$/i.test(
+          p
+        );
+      if (!looksLikeAsset) continue;
+      if (USER_INPUT_RE.test(p)) {
+        if (!existsSync(join(dir, p)) && !missingFiles.has(`input:${p}`)) {
+          missingFiles.set(`input:${p}`, line);
+        }
+        continue;
+      }
+      if (!existsSync(join(dir, p)) && !missingFiles.has(p)) {
+        missingFiles.set(p, line);
+      }
+    }
