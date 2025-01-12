@@ -256,3 +256,17 @@ export function staticChecks(dir, steps, opts = {}) {
         missingFiles.set(p, line);
       }
     }
+
+    const cdMatch = cmd.match(/^\s*cd\s+([^\s;&|]+)/);
+    if (cdMatch && !cdMatch[1].startsWith("/") && !cdMatch[1].includes("..")) {
+      const p = cdMatch[1];
+      if (
+        p !== repoName && // `cd <repo>` re-enters the staged clone, not missing
+        !PLACEHOLDER_RE.test(p) &&
+        !existsSync(join(dir, p)) &&
+        !missingFiles.has(p)
+      ) {
+        missingFiles.set(p, line);
+      }
+    }
+  }
