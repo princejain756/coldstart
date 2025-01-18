@@ -270,3 +270,19 @@ export function staticChecks(dir, steps, opts = {}) {
       }
     }
   }
+
+  for (const [file, line] of missingFiles) {
+    if (file.startsWith("input:")) {
+      findings.push({
+        level: "warn",
+        line,
+        msg: `step expects \`${file.slice(6)}\` - a file the user brings, not one the repo ships (fine, but worth saying in the README)`,
+      });
+    } else {
+      findings.push({
+        level: "flag",
+        line,
+        msg: `README references \`${file}\` but it does not exist in the repo`,
+      });
+    }
+  }
