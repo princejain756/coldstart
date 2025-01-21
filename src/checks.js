@@ -286,3 +286,19 @@ export function staticChecks(dir, steps, opts = {}) {
       });
     }
   }
+
+  for (const pm of pmInReadme) {
+    const lockfilePm = pms.find((p) => p !== pm);
+    if (lockfilePm) {
+      findings.push({
+        level: "warn",
+        msg: `README uses \`${pm}\` but the repo ships a ${lockfilePm} lockfile`,
+      });
+    }
+    if (!docker && !which(pm)) {
+      findings.push({
+        level: "warn",
+        msg: `\`${pm}\` is used by the README but is not on this machine's PATH`,
+      });
+    }
+  }
