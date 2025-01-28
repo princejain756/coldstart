@@ -302,3 +302,13 @@ export function staticChecks(dir, steps, opts = {}) {
       });
     }
   }
+
+  for (const v of envVars) {
+    if (!hasEnvExample) {
+      findings.push({
+        level: "flag",
+        msg: `README needs a secret (\`${v}\`) but the repo ships no .env.example / .env.sample - a new user has to guess`,
+      });
+      break; // once is enough
+    }
+  }
