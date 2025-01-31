@@ -312,3 +312,22 @@ export function staticChecks(dir, steps, opts = {}) {
       break; // once is enough
     }
   }
+
+  // binaries the README assumes exist
+  const wanted = new Set();
+  for (const { cmd } of steps) {
+    const first = cmd.match(/^\s*(?:sudo\s+)?([a-zA-Z0-9_.-]+)\s/)?.[1];
+    if (first && /^(docker|go|cargo|rustc|python\d*|pip\d*|uv|poetry|make|cmake|gcc|rustc|node|php|composer|mysql|psql|redis-server|ffmpeg|ffmpeg)$/.test(first)) {
+      wanted.add(first);
+    }
+  }
+  if (!docker) {
+    for (const b of wanted) {
+      if (!which(b)) {
+        findings.push({
+          level: "warn",
+          msg: `README needs \`${b}\` - not on this machine's PATH (fresh users may not have it either)`,
+        });
+      }
+    }
+  }
