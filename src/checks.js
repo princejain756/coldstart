@@ -331,3 +331,9 @@ export function staticChecks(dir, steps, opts = {}) {
       }
     }
   }
+
+  if (!findings.length) {
+    findings.push({ level: "ok", msg: "no static problems found" });
+  }
+  return findings;
+}
