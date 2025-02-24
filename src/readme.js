@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const QUICKSTART_RE =
@@ -20,7 +20,7 @@ export function findReadme(dir) {
 
 // a line that is clearly a command vs. pasted example output
 const COMMANDISH_RE =
-  /^(\$\s|>\s|❯\s|% \s|sudo\s|npm\b|npx\b|pnpm\b|yarn\b|bun\b|bunx\b|node\b|git\b|cd\b|cp\b|mv\b|mkdir\b|rm\b|cat\b|echo\b|touch\b|curl\b|wget\b|tar\b|unzip\b|pipx?\d*\b|python\d*\b|uv\b|poetry\b|docker\b|docker-compose\b|make\b|cmake\b|g\+\+|gcc\b|go\b|cargo\b|mvn\b|gradle\b|\.\.?\/[\w./~-]|~\/|source\b|export\b|set\b|[A-Z_][A-Z0-9_]*=|chmod\b|ln\b|brew\b|apt(-get)?\b|php\b|composer\b|bundle\b|rails\b|rake\b|gem\b|redis-cli\b|psql\b|mysql\b|sqlite3\b|ffmpeg\b|sh\b|bash\b|zsh\b|nohup\b|pm2\b|jest\b|vitest\b|pytest\b|tsc\b|eslint\b|prettier\b|tsx\b|vite\b|next\b|uvicorn\b|flask\b|gunicorn\b|nginx\b|open\b)/i;
+  /^(\$\s|>\s|❯\s|% \s|sudo\s|npm\b|npx\b|pnpm\b|yarn\b|bun\b|deno\b|bunx\b|node\b|git\b|gh\b|glab\b|cd\b|cp\b|mv\b|mkdir\b|rm\b|cat\b|echo\b|touch\b|curl\b|wget\b|tar\b|unzip\b|zip\b|pipx?\d*\b|python\d*\b|uv\b|poetry\b|pipenv\b|pdm\b|hatch\b|rye\b|conda\b|docker\b|docker-compose\b|make\b|cmake\b|g\+\+|gcc\b|go\b|cargo\b|rustc\b|mvn\b|gradle\b|\.\.?\/[\w./~-]|~\/|source\b|export\b|set\b|[A-Z_][A-Z0-9_]*=|chmod\b|chown\b|ln\b|systemctl\b|brew\b|apt(-get)?\b|snap\b|dnf\b|yum\b|pacman\b|kubectl\b|helm\b|terraform\b|ansible\b|just\b|turbo\b|nx\b|prisma\b|zig\b|task\b|mise\b|aws\b|gcloud\b|az\b|vercel\b|netlify\b|flyctl\b|wrangler\b|supabase\b|firebase\b|stripe\b|php\b|composer\b|bundle\b|rails\b|rake\b|gem\b|redis-cli\b|psql\b|mysql\b|mongosh\b|mongo\b|sqlite3\b|ffmpeg\b|magick\b|convert\b|rsync\b|ssh\b|scp\b|vagrant\b|nix\b|sh\b|bash\b|zsh\b|pwsh\b|nohup\b|pm2\b|jest\b|vitest\b|pytest\b|tsc\b|eslint\b|prettier\b|tsx\b|esbuild\b|vite\b|next\b|nuxt\b|astro\b|remix\b|expo\b|fastapi\b|flask\b|django\b|uvicorn\b|gunicorn\b|nginx\b|caddy\b|http-server\b|live-server\b|json-server\b|xcodebuild\b|swift\b|dotnet\b|java\b|javac\b|kotlin\b|sbt\b|perl\b|ruby\b|claude\b|codex\b|aider\b|ollama\b|open\b)/i;
 
 // lines that are literal placeholders, not commands
 const PLACEHOLDER_LINE_RE =
@@ -28,7 +28,8 @@ const PLACEHOLDER_LINE_RE =
 
 // Split a fenced block's text into runnable command lines.
 // Returns null when the block looks like pasted output, not commands.
-function blockToCommands(text) {
+// forceKeep (a coldstart: directive is present) keeps every cleaned line.
+function blockToCommands(text, forceKeep = false) {
   const entries = [];
   let pending = "";
   let hadPrompt = false;
@@ -49,6 +50,7 @@ function blockToCommands(text) {
   }
   if (pending.trim()) entries.push({ cmd: pending.trim(), hadPrompt });
   if (!entries.length) return null;
+  if (forceKeep) return entries.map((e) => e.cmd);
 
   // a $ prompt line is a command even when the binary is custom/unknown
   const commandish = entries.filter((e) => e.hadPrompt || COMMANDISH_RE.test(e.cmd));
@@ -59,14 +61,34 @@ function blockToCommands(text) {
     : commandish.map((e) => e.cmd);
 }
 
+// invisible per-block controls: <!-- coldstart:ignore -->, <!-- coldstart:env K=V -->
+function parseDirective(text) {
+  const m = text.match(/<!--\s*coldstart:(.*?)\s*-->/);
+  if (!m) return null;
+  const d = {};
+  for (const tok of m[1].trim().split(/\s+/)) {
+    if (tok === "ignore") d.ignore = true;
+    else if (tok === "daemon") d.daemon = true;
+    else if (/^env$/.test(tok)) d.envNext = true;
+    else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tok)) {
+      const i = tok.indexOf("=");
+      (d.env ??= {})[tok.slice(0, i)] = tok.slice(i + 1);
+    }
+  }
+  return d;
+}
+
 // Parse a README into ordered shell steps with their section context.
 export function extractSteps(markdown) {
   const lines = markdown.split("\n");
   const headingStack = []; // breadcrumb per level: ## Install > ### 1. Configure
   let inFence = false;
+  let fenceChar = "`";
+  let fenceLen = 3;
   let fenceLang = "";
   let fence = [];
   let fenceLine = 0;
+  let fenceDirective = null;
   const steps = [];
   const sections = [];
 
@@ -76,30 +98,56 @@ export function extractSteps(markdown) {
     if (!fence.length) return;
     if (SHELL_LANGS.has(fenceLang)) {
       const tagged = fenceLang !== "" && fenceLang !== "text";
-      const cmds = blockToCommands(fence.join("\n"));
+      // a directive means the author asserts these are commands even if none
+      // of the lines match known binaries - forceKeep keeps them all
+      const cmds = blockToCommands(fence.join("\n"), Boolean(fenceDirective));
       if (cmds && cmds.length) {
-        for (const cmd of cmds) {
-          steps.push({ cmd, line: fenceLine, heading: headingText(), tagged });
-        }
+        cmds.forEach((cmd, idx) => {
+          // daemon applies to the block's server, not every line in it
+          let stepDir = fenceDirective || undefined;
+          if (fenceDirective?.daemon && idx < cmds.length - 1) {
+            const { daemon, ...rest } = fenceDirective;
+            stepDir = Object.keys(rest).length ? rest : undefined;
+          }
+          steps.push({
+            cmd,
+            line: fenceLine,
+            heading: headingText(),
+            tagged,
+            directive: stepDir,
+          });
+        });
       }
     }
     fence = [];
+    fenceDirective = null;
   };
 
   lines.forEach((line, i) => {
-    if (inFence && /^\s*```\s*$/.test(line)) {
+    const fenceRe = new RegExp(`^\\s*(${fenceChar === "`" ? "`" : "~"}{${fenceLen},})\\s*$`);
+    if (inFence && fenceRe.test(line)) {
       flush();
       inFence = false;
       return;
     }
     if (!inFence) {
-      const open = line.match(/^\s*```\s*([\w-]*)/);
+      const open = line.match(/^\s*(`{3,}|~{3,})\s*([\w-]*)/);
       if (open) {
         inFence = true;
-        fenceLang = (open[1] || "").toLowerCase();
+        fenceChar = open[1][0];
+        fenceLen = open[1].length;
+        fenceLang = (open[2] || "").toLowerCase();
         fenceLine = i + 1;
         return;
       }
+      const directive = parseDirective(line);
+      if (directive) {
+        fenceDirective = directive;
+        return;
+      }
+      // a directive only applies to the block right after it - any real
+      // content between the comment and the fence resets it
+      if (!/^\s*$/.test(line) && !/^\s*<!--/.test(line)) fenceDirective = null;
       // a second # H1 starts a fresh document context - clear the breadcrumb
       if (/^\s{0,3}#\s+/.test(line)) {
         headingStack.length = 0;
@@ -140,37 +188,3 @@ export function readReadme(dir) {
 
 // Commands that should not be auto-replayed: they'd mutate the host, ask for
 // input we can't give, or only make sense outside a clone.
-const SKIP_RE =
-  /^\s*(sudo\b|open\b|code\b|xcode-select|ssh\b|git\s+push|npm\s+publish|gh\s+repo\s+create|docker\s+push|rm\s+-rf?\s*\/|say\b|osascript|npm\s+(i|install)\s+(-g|--global)\b|brew\s+install\b|brew\s+services\b)/;
-const INTERACTIVE_HINT = /create-(next|vite|react|expo|remix|nuxt|svelte)-app|npm\s+init|yarn\s+create|pnpm\s+create|read\s+-/;
-
-// `git clone <url> && cd <repo>` at the top of a README re-fetches remote
-// state - coldstart already staged the committed clone, so cloning the repo
-// itself is a no-op. Sibling-repo clones still run for real.
-const CLONE_SELF_RE = /^\s*git\s+clone\s+(?:-\S+\s+)*(\S+)/;
-export function classifyStep(cmd, repoName = null) {
-  if (SKIP_RE.test(cmd)) return { run: false, why: "host-side command" };
-  const cloneTarget = cmd.match(CLONE_SELF_RE)?.[1];
-  if (
-    cloneTarget &&
-    repoName &&
-    cloneTarget
-      .replace(/\/+$/, "")
-      .split("/")
-      .pop()
-      .replace(/\.git$/, "") === repoName
-  )
-    return { run: false, why: "repo already cloned" };
-  if (INTERACTIVE_HINT.test(cmd)) return { run: false, why: "interactive" };
-  return { run: true };
-}
-
-export function isServerish(cmd) {
-  if (
-    /\b(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|serve|start|watch|preview)\b/.test(cmd)
-  )
-    return true;
-  return /\b(uvicorn|gunicorn|flask\s+run|rails\s+s(erver)?|http-server|live-server|caddy\s+run|nginx\b|next\s+dev|nodemon|pm2\s+start|docker\s+compose\s+up|docker-compose\s+up|make\s+(dev|serve|run|start|up)|python\d*\s+-m\s+http\.server|php\s+-S)\b/.test(
-    cmd
-  );
-}
