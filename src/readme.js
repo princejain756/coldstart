@@ -212,3 +212,15 @@ export function classifyStep(cmd, repoName = null) {
   if (INTERACTIVE_HINT.test(cmd)) return { run: false, why: "interactive" };
   return { run: true };
 }
+
+export function isServerish(cmd) {
+  if (
+    /\b(npm|pnpm|yarn|bun|deno)\s+(run\s+)?(dev|serve|start|watch|preview)\b/.test(
+      cmd
+    )
+  )
+    return true;
+  return /\b(uvicorn|gunicorn|flask\s+run|rails\s+s(erver)?|http-server|live-server|caddy\s+run|nginx\b|next\s+dev|nodemon|pm2\s+start|docker\s+compose\s+up|docker-compose\s+up|make\s+(dev|serve|run|start|up)|python\d*\s+-m\s+http\.server|php\s+-S)\b/.test(
+    cmd
+  );
+}
