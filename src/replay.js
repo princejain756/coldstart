@@ -1,5 +1,5 @@
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, cpSync, existsSync } from "node:fs";
+import { mkdtempSync, cpSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, isAbsolute } from "node:path";
 
@@ -178,31 +178,88 @@ function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
   });
 }
 
+// `export A=$(cmd)` can't be captured by regex - run it in the session shell
+// and print the resulting value so later steps see it
+function evalAssign(cmd, name, { cwd, env }) {
+  const evalCmd = `${cmd}; printf '\\n%s' "\$${name}"`;
+  const r = spawnSync("sh", ["-c", evalCmd], {
+    cwd,
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+  });
+  if (r.status !== 0) return { ok: false };
+  return { ok: true, value: (r.stdout ?? "").replace(/^[\s\S]*\n/, "") };
+}
+
 const SERVER_TIMEOUT = 15_000;
 const STEP_TIMEOUT = 240_000;
+
+// `npx <this-repo's-own-package>` inside the clone resolves the unbuilt local
+// package, but a real user runs it from their own project - force registry.
+// Private/unpublished packages can't resolve @latest: run the local bin so
+// the README's intent is still exercised against the checked-out source.
+function selfPackageMap(dir) {
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    const map = new Map();
+    const bins =
+      typeof pkg.bin === "string" ? [pkg.name] : Object.keys(pkg.bin ?? {});
+    const binFile =
+      typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.[bins[0]];
+    const local = binFile
+      ? `"${join(dir, binFile).replace(/"/g, "")}"`
+      : null;
+    if (pkg.name) map.set(pkg.name, { pkg: pkg.name, local });
+    bins.forEach((b) => pkg.name && map.set(b, { pkg: pkg.name, local }));
+    return { map, private: !!pkg.private };
+  } catch {
+    return { map: new Map(), private: false };
+  }
+}
+
+function rewriteSelfNpx(cmd, selfMap, isPrivate) {
+  return cmd.replace(
+    /\bnpx\s+(-[a-zA-Z-]+\s+)*(@?[\w./~-][\w./-]*)/g,
+    (full, flags, spec) => {
+      const bare = spec.replace(/^@/, "").split("/")[0];
+      const base = spec.startsWith("@")
+        ? spec.split("/").slice(0, 2).join("/")
+        : bare;
+      const hit = selfMap.get(base);
+      if (!hit || spec.includes("@", spec.startsWith("@") ? 1 : 0)) return full;
+      if (isPrivate && hit.local) return hit.local;
+      return `npx ${flags ?? ""}${hit.pkg}@latest`;
+    }
+  );
+}
 
 export async function replay(steps, opts) {
   const {
     cloneDir,
     isServerish,
     classifyStep,
+    blocker = null,
     keepGoing = false,
     repoName = null,
+    onStep = () => {},
   } = opts;
 
   // `export KEY=value` steps build a session env that later steps inherit,
   // which is how a README's "set this, then run that" sequence is meant to go
   const env = {};
+  const { map: selfMap, private: selfPrivate } = selfPackageMap(cloneDir);
   let cwd = cloneDir;
   const results = [];
   let stopped = false;
 
-  // backgrounded servers get reaped so a second server can't EADDRINUSE on
-  // the first one's port
+  // backgrounded servers: explicit coldstart:daemon ones survive server
+  // transitions; heuristic ones get reaped so a second server can't
+  // EADDRINUSE on the first's port
   const daemons = [];
-  const reapDaemons = () => {
+  const reapDaemons = (onlyImplicit) => {
     for (let i = daemons.length - 1; i >= 0; i--) {
       const d = daemons[i];
+      if (onlyImplicit && d.keep) continue;
       try {
         if (d.pid) process.kill(-d.pid, "SIGKILL");
       } catch {}
@@ -212,7 +269,7 @@ export async function replay(steps, opts) {
 
   const onSig = () => {
     reapLive();
-    reapDaemons();
+    reapDaemons(false);
     process.exit(130);
   };
   process.once("SIGINT", onSig);
@@ -234,10 +291,26 @@ export async function replay(steps, opts) {
   try {
     for (const step of steps) {
       let { cmd } = step;
+      const rewritten = rewriteSelfNpx(cmd, selfMap, selfPrivate);
+      const note =
+        rewritten !== cmd
+          ? selfPrivate
+            ? "runs local bin (private package, registry version impossible)"
+            : "runs as registry package (what a user gets)"
+          : null;
+      cmd = rewritten;
       if (stopped) {
         results.push({ ...step, status: "skip", why: "after failure" });
+        onStep(results.at(-1));
         continue;
       }
+
+      if (step.directive?.ignore) {
+        results.push({ ...step, status: "skip", why: "coldstart:ignore" });
+        onStep(results.at(-1));
+        continue;
+      }
+      if (step.directive?.env) Object.assign(env, step.directive.env);
 
       const assign = parseAssignment(cmd);
       if (assign) {
@@ -245,80 +318,20 @@ export async function replay(steps, opts) {
           ? assign.value
           : expandVars(assign.value, env);
         results.push({ ...step, status: "env", value: assign.name });
+        onStep(results.at(-1));
         continue;
       }
-
-      // peel every leading `cd x &&` - `cd a && cd b && cmd` chains work
-      for (;;) {
-        const cdThen = cmd.match(CD_THEN_RE);
-        const cdOnly = cmd.match(CD_RE);
-        if (!cdThen && !cdOnly) break;
-        const { ok, at } = doCd((cdThen || cdOnly)[1]);
-        if (!ok) {
-          results.push({ ...step, status: "fail", why: "no such dir" });
-          stopped = !keepGoing;
-          cmd = null;
-          break;
+      // `export A=$(cmd)` - evaluate in the session and capture the value,
+      // otherwise the variable dies with the child sh
+      const subAssign = cmd
+        .replace(/\s+#.*$/, "")
+        .match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=([^=]*)$/);
+      if (subAssign && /\$\(|`/.test(subAssign[2])) {
+        const ev = evalAssign(cmd, subAssign[1], { cwd, env });
+        if (ev.ok) {
+          env[subAssign[1]] = ev.value;
+          results.push({ ...step, status: "env", value: subAssign[1] });
+          onStep(results.at(-1));
+          continue;
         }
-        results.push({ ...step, cmd: `cd ${(cdThen || cdOnly)[1]}`, status: "cd", why: at });
-        if (cdOnly) {
-          cmd = null;
-          break;
-        }
-        cmd = cdThen[2];
       }
-      if (cmd === null) continue;
-
-      const cls = classifyStep(cmd, repoName);
-      if (!cls.run) {
-        results.push({ ...step, status: "skip", why: cls.why });
-        continue;
-      }
-
-      const serverish = isServerish(cmd);
-      // a second server replaces the first (dev -> start would EADDRINUSE on
-      // the same port)
-      if (serverish) reapDaemons();
-      const timeoutMs = serverish ? SERVER_TIMEOUT : STEP_TIMEOUT;
-      const r = await runOnce(cmd, {
-        cwd,
-        env,
-        timeoutMs,
-        keepAlive: serverish,
-        onOrphan: (pid) => daemons.push({ pid }),
-      });
-
-      let status;
-      let why = null;
-      if (r.timedOut && serverish) status = "started";
-      else if (r.timedOut) status = "timeout";
-      else if (r.code === 0) status = "ok";
-      else if (r.code === 127) {
-        const { first, firstMissing } = missingBinary(cmd, r.err + r.out, hostExists);
-        if (!firstMissing) {
-          status = "fail"; // the README's own command chain broke inside
-        } else {
-          status = "skip";
-          why = `\`${first}\` not installed on this machine`;
-        }
-      } else status = "fail";
-
-      results.push({
-        ...step,
-        cmd,
-        status,
-        ms: r.ms,
-        code: r.code,
-        tail: (r.err || r.out || "").trim().split("\n").slice(-4).join("\n"),
-        serverish,
-        why,
-      });
-      if (status === "fail" || status === "timeout") stopped = !keepGoing;
-    }
-  } finally {
-    process.removeListener("SIGINT", onSig);
-    process.removeListener("SIGTERM", onSig);
-    reapDaemons();
-  }
-  return { results, env };
-}
