@@ -335,3 +335,23 @@ export async function replay(steps, opts) {
           continue;
         }
       }
+
+      // peel every leading `cd x &&` - `cd a && cd b && cmd` chains work
+      for (;;) {
+        const cdThen = cmd.match(CD_THEN_RE);
+        const cdOnly = cmd.match(CD_RE);
+        if (!cdThen && !cdOnly) break;
+        const { ok, at } = doCd((cdThen || cdOnly)[1]);
+        if (!ok) {
+          results.push({ ...step, status: "fail", why: "no such dir" });
+          onStep(results.at(-1));
+          stopped = !keepGoing;
+          cmd = null;
+          break;
+        }
+        results.push({ ...step, cmd: `cd ${(cdThen || cdOnly)[1]}`, status: "cd", why: at });
+        onStep(results.at(-1));
+        if (cdOnly) { cmd = null; break; }
+        cmd = cdThen[2];
+      }
+      if (cmd === null) continue;
