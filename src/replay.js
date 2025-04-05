@@ -355,3 +355,25 @@ export async function replay(steps, opts) {
         cmd = cdThen[2];
       }
       if (cmd === null) continue;
+
+      const whyBlock = blocker ? blocker(cwd, cmd) : step.skipWhy;
+      const cls = whyBlock ? { run: false, why: whyBlock } : classifyStep(cmd, repoName);
+      if (!cls.run) {
+        results.push({ ...step, status: "skip", why: cls.why });
+        onStep(results.at(-1));
+        continue;
+      }
+
+      const serverish = isServerish(cmd) || !!step.directive?.daemon;
+      // a second heuristic server replaces the first (dev -> start would
+      // EADDRINUSE on the same port); explicit daemons are kept on purpose
+      if (serverish && !step.directive?.daemon) reapDaemons(true);
+      const timeoutMs = serverish ? SERVER_TIMEOUT : STEP_TIMEOUT;
+      const r = await runOnce(cmd, {
+        cwd,
+        env,
+        timeoutMs,
+        keepAlive: serverish,
+        onOrphan: (pid) =>
+          daemons.push({ pid, keep: !!step.directive?.daemon }),
+      });
