@@ -377,3 +377,18 @@ export async function replay(steps, opts) {
         onOrphan: (pid) =>
           daemons.push({ pid, keep: !!step.directive?.daemon }),
       });
+
+      let status;
+      let why = null;
+      if (r.timedOut && serverish) status = "started";
+      else if (r.timedOut) status = "timeout";
+      else if (r.code === 0) status = "ok";
+      else if (r.code === 127) {
+        const { first, missing, firstMissing } = missingBinary(cmd, r.err + r.out, hostExists);
+        if (!firstMissing) {
+          status = "fail"; // the README's own command chain broke inside
+        } else {
+          status = "skip";
+          why = `\`${first}\` not installed on this machine`;
+        }
+      } else status = "fail";
