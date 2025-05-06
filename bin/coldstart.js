@@ -7,7 +7,7 @@ import {
   classifyStep,
   isServerish,
 } from "../src/readme.js";
-import { staticChecks } from "../src/checks.js";
+import { staticChecks, stepBlocker } from "../src/checks.js";
 import { stageClone, replay } from "../src/replay.js";
 import { render } from "../src/report.js";
 
@@ -85,13 +85,14 @@ try {
     process.exit(2);
   }
 
-  const findings = staticChecks(cloneDir, steps);
+  const findings = staticChecks(cloneDir, steps, { repoName });
   let results = [];
   if (!args.onlyStatic) {
     ({ results } = await replay(steps, {
       cloneDir,
       isServerish,
       classifyStep,
+      blocker: (cwd, cmd) => stepBlocker(cwd, cmd),
       keepGoing: args.keepGoing,
       repoName,
     }));
