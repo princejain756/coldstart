@@ -13,7 +13,7 @@ npx coldstart-cli <path>       # a local repo
 npx coldstart-cli <git-url>    # or straight from GitHub
 ```
 
-![coldstart replaying a broken quickstart](demo.png)
+![coldstart replaying a README](demo.png)
 
 ## What it catches
 
@@ -21,52 +21,63 @@ npx coldstart-cli <git-url>    # or straight from GitHub
   anything runs)
 - `./scripts/setup.sh` that the README references but the repo forgot to ship
 - `pip install -r requirements.txt` with no requirements.txt committed
+- README says `npm` but the lockfile says `pnpm`
+- Steps that need `MY_API_KEY` but no `.env.example` to tell the user what
+  to set
+- Commands that only work because *your* machine happens to have the tool
 
 ## What it does
 
-1. **Clones the committed state** into a temp dir, so `node_modules` and
-   `.env` files can't hide the breakage. Non-git dirs get copied minus the
-   usual ignored folders.
+1. **Clones the committed state** into a temp dir, so `node_modules`,
+   `.env`, and uncommitted files can't hide the breakage. Non-git dirs get
+   copied minus the usual ignored folders.
 2. **Parses the README** for shell blocks in Install / Quickstart / Usage
    sections. Pasted example output and placeholder lines get filtered out.
 3. **Static checks** against the clean clone: missing scripts, missing
-   referenced files.
+   referenced files, package-manager mismatches, secret env vars with no
+   example file, binaries not on PATH.
 4. **Replays each command** in order. `export` and `cd` steps update the
-   session for later steps, so "set this, then run that" sequences work.
-   Dev servers get a 15s startup window and stay running so later steps can
-   hit them. Steps that would mutate your machine (`sudo`, `brew install`, a
-   global `npm i -g`) or that need interactive input are skipped with a note.
-   A command that only failed because the tool isn't on this machine is
-   reported as a skip, not a README failure.
-   `git clone <this-repo>` at the top of a quickstart is a no-op - the clone
-   is already staged - and `cd <repo>` re-enters it.
-5. **Verdict**: PASSES, RUNS-with-flags, or BROKEN at the step where a new
+   session for later steps. Dev servers get a 15s startup window, stay
+   running so later steps can hit them, and get reaped at the end. Steps
+   needing placeholder paths (`./my-app`, `owner/repo`) or files the user
+   brings (`photo.jpg`) are skipped with a note, not failed.
+   `npx <the-repo's-own-package>` resolves from the registry, the way a
+   real user's machine would see it; for private packages it runs the
+   checked-out bin instead.
+5. **Verdict**: PASS, RUNS-with-flags, or BROKEN at the step where a new
    user hits the wall, with the last lines of real output.
 
+Exit code is non-zero on BROKEN (and on flags in `--only-static`), so it
+drops into CI.
+
+## Options
+
 ```
-coldstart - fresh-clone replay
-repo: broken-quickstart   readme: README.md   staged: copy of working dir (not a git repo)   env: host shell
-
-static checks (against the clean clone)
-  flag  `npm run start` but package.json has no "start" script (has: build, test)  [line 7]
-
-replay (3 steps)
-   1 PASS   502ms npm install
-   2 FAIL   200ms npm run start
-   3 skip         npm run build  (after failure)
-
-  last output lines:
-    npm error
-    npm error To see a list of scripts, run:
-    npm error   npm run
-
-verdict: BROKEN at step 2 - a new user following your README hits a wall there.
+--only-static   run the checks, skip executing anything
+--keep-going    don't stop at the first failure
+--json          machine-readable report
+--quiet         just the verdict line
 ```
 
-The report is colourised on a TTY and plain when piped, so it reads the same
-in a log. The exit code is non-zero on BROKEN - and on flags in
-`--only-static`, which makes that mode a usable gate: no commands executed,
-just the checks.
+## Directives
+
+HTML comments control replay without uglifying the rendered README:
+
+````markdown
+<!-- coldstart:ignore -->
+```bash
+terraform apply      # never replayed, shown as skipped
+```
+
+<!-- coldstart:env DATABASE_URL=postgres://localhost/test -->
+```bash
+npm run migrate      # runs with DATABASE_URL injected
+```
+````
+
+`coldstart:daemon` before a server block marks its last command as
+backgrounded without needing the usual dev/start naming. Earlier commands
+in the same block run normally.
 
 ## Example
 
@@ -97,15 +108,6 @@ known step, runs the CLI against them, and asserts the verdict, the failing
 step, and the exit code. It is the same path a user takes - no mocking of
 the runner.
 
-## Options
-
-```
---only-static   run the checks, skip executing anything
---keep-going    don't stop at the first failure
---json          machine-readable report
---quiet         just the verdict line
-```
-
 ## Honest limits
 
 - **Host replay shares your env.** Tools you have installed mask missing
@@ -115,5 +117,8 @@ the runner.
 - **It replays what the README literally says.** A quickstart that works
   but is badly explained still passes; the docs-audit part is limited to
   the static checks.
+- **Placeholder detection is heuristic.** `./my-app` and `owner/repo` are
+  treated as examples and skipped; if your README genuinely requires a
+  path that is missing, the static flag is what catches it.
 
 MIT
