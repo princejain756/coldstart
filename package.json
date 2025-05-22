@@ -1,6 +1,6 @@
 {
   "name": "coldstart-cli",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Does your repo pass a fresh clone? Replays your README's install instructions in a clean checkout and reports where a new user hits a wall.",
   "type": "module",
   "bin": {
@@ -21,9 +21,11 @@
     "quickstart",
     "install",
     "docs",
+    "ci",
     "developer-experience",
     "testing",
-    "fresh-clone"
+    "fresh-clone",
+    "setup"
   ],
   "license": "MIT",
   "author": "Prince Jain",
