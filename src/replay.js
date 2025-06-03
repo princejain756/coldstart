@@ -109,8 +109,9 @@ function hostExists(bin) {
   return r.status === 0;
 }
 
-// live host processes, reaped on SIGINT/SIGTERM. detached children get
-// their own process group (-pid); plain children are killed directly.
+// live host processes + docker exec clients, reaped on SIGINT/SIGTERM.
+// detached children get their own process group (-pid); plain children are
+// killed directly.
 const liveProcs = new Set();
 
 function reapLive() {
@@ -138,10 +139,7 @@ function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
     liveProcs.add(proc);
     const drop = () => liveProcs.delete(proc);
     // answer "y" once so npx-style install prompts behave like a real user
-    // pressing enter; stdin then closes so nothing blocks on it.
-    // a step that exits before we write raises EPIPE on the socket -
-    // unhandled, that kills the whole run
-    proc.stdin.on("error", () => {});
+    // pressing enter; stdin then closes so nothing blocks on it
     proc.stdin.write("y\n");
     proc.stdin.end();
     let out = "";
@@ -178,17 +176,104 @@ function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
   });
 }
 
+// one long-lived container per replay so installs in earlier steps survive
+// into later ones - docker run --rm per step loses pip/apt installs between
+// commands
+export function dockerSession(image, cloneDir) {
+  const name = `coldstart-${process.pid}-${Date.now().toString(36)}`;
+  const r = spawnSync(
+    "docker",
+    [
+      "run", "-d", "--init", "--rm", "--network", "bridge",
+      "--name", name, "-v", `${cloneDir}:/repo`, "-w", "/repo",
+      image, "sleep", "infinity",
+    ],
+    { encoding: "utf8" }
+  );
+  if (r.status !== 0) {
+    throw new Error(`docker run failed: ${(r.stderr || r.stdout || "").slice(-300)}`);
+  }
+  const cleanup = () => {
+    // root-owned files in /repo would break rmSync(tmp) on Linux - wipe first
+    spawnSync("docker", ["exec", name, "sh", "-c", "rm -rf /repo/* /repo/.[!.]* /tmp/cs-d-*.pid 2>/dev/null || true"], { stdio: "ignore" });
+    spawnSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+  };
+  return { name, dispose: cleanup };
+}
+
+function dockerExecArgs(cmd, { cwd, env, cloneDir, name }) {
+  const rel = cwd.startsWith(cloneDir) ? cwd.slice(cloneDir.length) : "";
+  const workdir = "/repo" + rel;
+  const envArgs = Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]);
+  return ["exec", "-w", workdir, ...envArgs, name, "sh", "-lc", cmd];
+}
+
+function runDocker(cmd, opts) {
+  const { daemonId } = opts;
+  // daemon servers run under setsid with a pidfile inside the container so a
+  // later server step (or cleanup) can kill the whole process group by pgid
+  const wrapped = daemonId
+    ? `setsid sh -c 'echo $$ > /tmp/cs-d-${daemonId}.pid; exec ${cmd.replace(/'/g, "'\\''")}' 2>/dev/null || sh -lc ${JSON.stringify(cmd)}`
+    : cmd;
+  const args = dockerExecArgs(wrapped, opts);
+  return new Promise((resolveP) => {
+    const t0 = Date.now();
+    const proc = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    liveProcs.add(proc);
+    const drop = () => liveProcs.delete(proc);
+    let out = "";
+    let err = "";
+    let done = false;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      drop();
+      clearTimeout(timer);
+      resolveP({ ...r, out, err, ms: Date.now() - t0 });
+    };
+    proc.stdout.on("data", (d) => (out += d));
+    proc.stderr.on("data", (d) => (err += d));
+    const timer = setTimeout(() => {
+      // killing the client detaches but the in-container server keeps
+      // running - later steps can still curl it; reaped via pidfile
+      proc.kill("SIGKILL");
+      finish({ code: null, timedOut: true });
+    }, opts.timeoutMs);
+    proc.on("close", (code) => finish({ code, timedOut: false }));
+    proc.on("error", () => finish({ code: 127, timedOut: false }));
+  });
+}
+
+function dockerKillDaemon(name, id) {
+  spawnSync(
+    "docker",
+    ["exec", name, "sh", "-c",
+     `kill -9 -$(cat /tmp/cs-d-${id}.pid) 2>/dev/null || kill -9 $(cat /tmp/cs-d-${id}.pid) 2>/dev/null || true; rm -f /tmp/cs-d-${id}.pid`],
+    { stdio: "ignore" }
+  );
+}
+
 // `export A=$(cmd)` can't be captured by regex - run it in the session shell
 // and print the resulting value so later steps see it
-function evalAssign(cmd, name, { cwd, env }) {
+function evalAssign(cmd, name, { cwd, env, cloneDir, dockerSess }) {
   const evalCmd = `${cmd}; printf '\\n%s' "\$${name}"`;
-  const r = spawnSync("sh", ["-c", evalCmd], {
-    cwd,
-    env: { ...process.env, ...env },
-    encoding: "utf8",
-  });
+  const r = dockerSess
+    ? spawnSync("docker", dockerExecArgs(evalCmd, { cwd, env, cloneDir, name: dockerSess.name }), { encoding: "utf8" })
+    : spawnSync("sh", ["-c", evalCmd], { cwd, env: { ...process.env, ...env }, encoding: "utf8" });
   if (r.status !== 0) return { ok: false };
   return { ok: true, value: (r.stdout ?? "").replace(/^[\s\S]*\n/, "") };
+}
+
+export function defaultDockerImage(dir) {
+  if (existsSync(join(dir, "package.json"))) return "node:22-bookworm-slim";
+  if (
+    existsSync(join(dir, "requirements.txt")) ||
+    existsSync(join(dir, "pyproject.toml"))
+  )
+    return "python:3.12-slim";
+  if (existsSync(join(dir, "go.mod"))) return "golang:1.23-bookworm";
+  if (existsSync(join(dir, "Cargo.toml"))) return "rust:1-slim-bookworm";
+  return null;
 }
 
 const SERVER_TIMEOUT = 15_000;
@@ -198,7 +283,7 @@ const STEP_TIMEOUT = 240_000;
 // package, but a real user runs it from their own project - force registry.
 // Private/unpublished packages can't resolve @latest: run the local bin so
 // the README's intent is still exercised against the checked-out source.
-function selfPackageMap(dir) {
+function selfPackageMap(dir, docker) {
   try {
     const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
     const map = new Map();
@@ -206,8 +291,9 @@ function selfPackageMap(dir) {
       typeof pkg.bin === "string" ? [pkg.name] : Object.keys(pkg.bin ?? {});
     const binFile =
       typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.[bins[0]];
+    // inside --docker the repo lives at /repo, not the host clone path
     const local = binFile
-      ? `"${join(dir, binFile).replace(/"/g, "")}"`
+      ? `"${(docker ? `/repo/${binFile.replace(/^\.\//, "")}` : join(dir, binFile)).replace(/"/g, "")}"`
       : null;
     if (pkg.name) map.set(pkg.name, { pkg: pkg.name, local });
     bins.forEach((b) => pkg.name && map.set(b, { pkg: pkg.name, local }));
@@ -239,18 +325,18 @@ export async function replay(steps, opts) {
     isServerish,
     classifyStep,
     blocker = null,
+    docker = null,
     keepGoing = false,
     repoName = null,
     onStep = () => {},
   } = opts;
 
-  // `export KEY=value` steps build a session env that later steps inherit,
-  // which is how a README's "set this, then run that" sequence is meant to go
   const env = {};
-  const { map: selfMap, private: selfPrivate } = selfPackageMap(cloneDir);
+  const { map: selfMap, private: selfPrivate } = selfPackageMap(cloneDir, docker);
   let cwd = cloneDir;
   const results = [];
   let stopped = false;
+  const dockerSess = docker ? dockerSession(docker, cloneDir) : null;
 
   // backgrounded servers: explicit coldstart:daemon ones survive server
   // transitions; heuristic ones get reaped so a second server can't
@@ -261,15 +347,20 @@ export async function replay(steps, opts) {
       const d = daemons[i];
       if (onlyImplicit && d.keep) continue;
       try {
-        if (d.pid) process.kill(-d.pid, "SIGKILL");
+        if (d.dockerId != null && dockerSess) dockerKillDaemon(dockerSess.name, d.dockerId);
+        else if (d.pid) process.kill(-d.pid, "SIGKILL");
       } catch {}
       daemons.splice(i, 1);
     }
   };
+  let daemonSeq = 0;
 
+  // one signal path for host and docker: kill live children + daemons,
+  // drop the container, exit. The tmp dir is removed by bin's exit handler.
   const onSig = () => {
     reapLive();
     reapDaemons(false);
+    dockerSess?.dispose();
     process.exit(130);
   };
   process.once("SIGINT", onSig);
@@ -327,7 +418,7 @@ export async function replay(steps, opts) {
         .replace(/\s+#.*$/, "")
         .match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=([^=]*)$/);
       if (subAssign && /\$\(|`/.test(subAssign[2])) {
-        const ev = evalAssign(cmd, subAssign[1], { cwd, env });
+        const ev = evalAssign(cmd, subAssign[1], { cwd, env, cloneDir, dockerSess });
         if (ev.ok) {
           env[subAssign[1]] = ev.value;
           results.push({ ...step, status: "env", value: subAssign[1] });
@@ -335,83 +426,3 @@ export async function replay(steps, opts) {
           continue;
         }
       }
-
-      // peel every leading `cd x &&` - `cd a && cd b && cmd` chains work
-      for (;;) {
-        const cdThen = cmd.match(CD_THEN_RE);
-        const cdOnly = cmd.match(CD_RE);
-        if (!cdThen && !cdOnly) break;
-        const { ok, at } = doCd((cdThen || cdOnly)[1]);
-        if (!ok) {
-          results.push({ ...step, status: "fail", why: "no such dir" });
-          onStep(results.at(-1));
-          stopped = !keepGoing;
-          cmd = null;
-          break;
-        }
-        results.push({ ...step, cmd: `cd ${(cdThen || cdOnly)[1]}`, status: "cd", why: at });
-        onStep(results.at(-1));
-        if (cdOnly) { cmd = null; break; }
-        cmd = cdThen[2];
-      }
-      if (cmd === null) continue;
-
-      const whyBlock = blocker ? blocker(cwd, cmd) : step.skipWhy;
-      const cls = whyBlock ? { run: false, why: whyBlock } : classifyStep(cmd, repoName);
-      if (!cls.run) {
-        results.push({ ...step, status: "skip", why: cls.why });
-        onStep(results.at(-1));
-        continue;
-      }
-
-      const serverish = isServerish(cmd) || !!step.directive?.daemon;
-      // a second heuristic server replaces the first (dev -> start would
-      // EADDRINUSE on the same port); explicit daemons are kept on purpose
-      if (serverish && !step.directive?.daemon) reapDaemons(true);
-      const timeoutMs = serverish ? SERVER_TIMEOUT : STEP_TIMEOUT;
-      const r = await runOnce(cmd, {
-        cwd,
-        env,
-        timeoutMs,
-        keepAlive: serverish,
-        onOrphan: (pid) =>
-          daemons.push({ pid, keep: !!step.directive?.daemon }),
-      });
-
-      let status;
-      let why = null;
-      if (r.timedOut && serverish) status = "started";
-      else if (r.timedOut) status = "timeout";
-      else if (r.code === 0) status = "ok";
-      else if (r.code === 127) {
-        const { first, missing, firstMissing } = missingBinary(cmd, r.err + r.out, hostExists);
-        if (!firstMissing) {
-          status = "fail"; // the README's own command chain broke inside
-        } else {
-          status = "skip";
-          why = `\`${first}\` not installed on this machine`;
-        }
-      } else status = "fail";
-
-      results.push({
-        ...step,
-        cmd,
-        origCmd: note ? step.cmd : undefined,
-        status,
-        ms: r.ms,
-        code: r.code,
-        tail: (r.err || r.out || "").trim().split("\n").slice(-4).join("\n"),
-        serverish,
-        note,
-        why,
-      });
-      onStep(results.at(-1));
-      if (status === "fail" || status === "timeout") stopped = !keepGoing;
-    }
-  } finally {
-    process.removeListener("SIGINT", onSig);
-    process.removeListener("SIGTERM", onSig);
-    reapDaemons(false);
-  }
-  return { results, env };
-}
