@@ -446,3 +446,11 @@ export async function replay(steps, opts) {
         cmd = cdThen[2];
       }
       if (cmd === null) continue;
+
+      const whyBlock = blocker ? blocker(cwd, cmd) : step.skipWhy;
+      const cls = whyBlock ? { run: false, why: whyBlock } : classifyStep(cmd, repoName);
+      if (!cls.run) {
+        results.push({ ...step, status: "skip", why: cls.why });
+        onStep(results.at(-1));
+        continue;
+      }
