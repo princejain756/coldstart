@@ -454,3 +454,23 @@ export async function replay(steps, opts) {
         onStep(results.at(-1));
         continue;
       }
+
+      const serverish = isServerish(cmd) || !!step.directive?.daemon;
+      // a second heuristic server replaces the first (dev -> start would
+      // EADDRINUSE on the same port); explicit daemons are kept on purpose
+      if (serverish && !step.directive?.daemon) reapDaemons(true);
+      const timeoutMs = serverish ? SERVER_TIMEOUT : STEP_TIMEOUT;
+      const dockerId = dockerSess && serverish ? ++daemonSeq : null;
+      const r = dockerSess
+        ? await runDocker(cmd, { cwd, env, cloneDir, name: dockerSess.name, timeoutMs, daemonId: dockerId })
+        : await runOnce(cmd, {
+            cwd,
+            env,
+            timeoutMs,
+            keepAlive: serverish,
+            onOrphan: (pid) =>
+              daemons.push({ pid, keep: !!step.directive?.daemon }),
+          });
+
+      if (dockerSess && serverish && r.timedOut)
+        daemons.push({ dockerId, keep: !!step.directive?.daemon });
