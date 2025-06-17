@@ -474,3 +474,22 @@ export async function replay(steps, opts) {
 
       if (dockerSess && serverish && r.timedOut)
         daemons.push({ dockerId, keep: !!step.directive?.daemon });
+
+      let status;
+      let why = null;
+      if (r.timedOut && serverish) status = "started";
+      else if (r.timedOut) status = "timeout";
+      else if (r.code === 0) status = "ok";
+      else if (r.code === 127) {
+        const exists = (bin) =>
+          dockerSess
+            ? spawnSync("docker", ["exec", dockerSess.name, "sh", "-lc", 'command -v "$1"', "sh", bin], { stdio: "pipe" }).status === 0
+            : hostExists(bin);
+        const { first, missing, firstMissing } = missingBinary(cmd, r.err + r.out, exists);
+        if (!firstMissing) {
+          status = "fail"; // the README's own command chain broke inside
+        } else {
+          status = "skip";
+          why = `\`${first}\` not installed on this machine`;
+        }
+      } else status = "fail";
