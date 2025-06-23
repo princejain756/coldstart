@@ -493,3 +493,26 @@ export async function replay(steps, opts) {
           why = `\`${first}\` not installed on this machine`;
         }
       } else status = "fail";
+
+      results.push({
+        ...step,
+        cmd,
+        origCmd: note ? step.cmd : undefined,
+        status,
+        ms: r.ms,
+        code: r.code,
+        tail: (r.err || r.out || "").trim().split("\n").slice(-4).join("\n"),
+        serverish,
+        note,
+        why,
+      });
+      onStep(results.at(-1));
+      if (status === "fail" || status === "timeout") stopped = !keepGoing;
+    }
+  } finally {
+    process.removeListener("SIGINT", onSig);
+    process.removeListener("SIGTERM", onSig);
+    reapDaemons(false);
+    dockerSess?.dispose();
+  }
+  return { results, env };
