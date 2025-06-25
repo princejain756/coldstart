@@ -516,3 +516,4 @@ export async function replay(steps, opts) {
     dockerSess?.dispose();
   }
   return { results, env };
+}
