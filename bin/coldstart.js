@@ -146,3 +146,43 @@ try {
         );
     }
   }
+
+  if (args.json) {
+    console.log(
+      JSON.stringify(
+        {
+          target,
+          readme: readme.name,
+          staged: staged.how,
+          docker,
+          findings,
+          results: results.map(({ tail, ...r }) => r),
+          verdict: broken ? "broken" : flags ? "runs-with-flags" : "passes",
+        },
+        null,
+        2
+      )
+    );
+  } else if (args.quiet) {
+    console.log(
+      broken
+        ? `BROKEN at step ${results.findIndex((r) => r.status === "fail" || r.status === "timeout") + 1}`
+        : flags
+          ? `RUNS, ${flags} flags`
+          : "PASSES"
+    );
+  } else {
+    process.stdout.write(
+      render({
+        target: repoName || target,
+        readmeName: readme.name,
+        how: staged.how,
+        uncommitted: staged.uncommitted,
+        findings,
+        results,
+        docker,
+      })
+    );
+  }
+  // static-only mode fails on flags too - that's the whole point of the gate
+  process.exit(broken || (args.onlyStatic && flags) ? 1 : 0);
