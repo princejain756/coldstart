@@ -53,10 +53,14 @@ drops into CI.
 ## Options
 
 ```
---only-static   run the checks, skip executing anything
---keep-going    don't stop at the first failure
---json          machine-readable report
---quiet         just the verdict line
+--docker [image]   replay inside one clean container per run (auto-detects
+                   node, python, go, rust from the repo). State persists
+                   between steps: pip installs and dev servers survive
+--only-static      checks only, run nothing
+--keep-going       don't stop at the first failure
+--json             machine-readable report
+--github           emit ::error/::warning annotations (auto in Actions)
+--quiet            just the verdict line
 ```
 
 ## Directives
@@ -111,7 +115,8 @@ the runner.
 ## Honest limits
 
 - **Host replay shares your env.** Tools you have installed mask missing
-  prerequisites a stranger wouldn't have. Host mode is the fast check.
+  prerequisites a stranger wouldn't have. `--docker` is the real clean
+  room; host mode is the fast check.
 - **POSIX shells only.** Commands run through `sh -c`; Windows READMEs with
   PowerShell blocks are detected but not replayed.
 - **It replays what the README literally says.** A quickstart that works
@@ -120,5 +125,7 @@ the runner.
 - **Placeholder detection is heuristic.** `./my-app` and `owner/repo` are
   treated as examples and skipped; if your README genuinely requires a
   path that is missing, the static flag is what catches it.
+- Commands run as you, on your machine. `curl | bash` steps get a warning
+  in the report; use `--docker` if the README is not yours.
 
 MIT
