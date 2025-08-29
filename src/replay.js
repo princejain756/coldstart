@@ -139,7 +139,10 @@ function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
     liveProcs.add(proc);
     const drop = () => liveProcs.delete(proc);
     // answer "y" once so npx-style install prompts behave like a real user
-    // pressing enter; stdin then closes so nothing blocks on it
+    // pressing enter; stdin then closes so nothing blocks on it.
+    // a step that exits before we write raises EPIPE on the socket -
+    // unhandled, that kills the whole run
+    proc.stdin.on("error", () => {});
     proc.stdin.write("y\n");
     proc.stdin.end();
     let out = "";
