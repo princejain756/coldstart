@@ -1,6 +1,12 @@
 # coldstart
 
+[![npm](https://img.shields.io/npm/v/coldstart-cli)](https://www.npmjs.com/package/coldstart-cli)
+[![ci](https://github.com/princejain756/coldstart/actions/workflows/ci.yml/badge.svg)](https://github.com/princejain756/coldstart/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 **Does your repo pass a fresh clone?**
+
+![coldstart replaying a broken quickstart](demo.gif)
 
 Every README makes a promise: run these commands and it works. coldstart
 checks the promise. It clones your repo into a clean temp dir, runs static
@@ -48,7 +54,14 @@ npx coldstart-cli <git-url>    # or straight from GitHub
    user hits the wall, with the last lines of real output.
 
 Exit code is non-zero on BROKEN (and on flags in `--only-static`), so it
-drops into CI.
+drops into CI. In GitHub Actions, findings land as inline annotations on
+the exact README lines:
+
+```yaml
+- run: npx coldstart-cli --only-static   # fast gate, no commands executed
+- run: npx coldstart-cli                 # or the full replay
+# annotations appear automatically on GitHub Actions; locally: --github
+```
 
 ## Options
 
@@ -101,17 +114,6 @@ verdict: BROKEN at step 2 - a new user following your README hits a wall there.
 The static check caught it before a single command ran. The replay confirms
 it with the real npm error.
 
-## Development
-
-```bash
-npm run selfcheck     # fixture repos in a temp dir, real replays
-```
-
-`test/selfcheck.mjs` builds throwaway git repos whose READMEs break at a
-known step, runs the CLI against them, and asserts the verdict, the failing
-step, and the exit code. It is the same path a user takes - no mocking of
-the runner.
-
 ## Honest limits
 
 - **Host replay shares your env.** Tools you have installed mask missing
@@ -127,5 +129,11 @@ the runner.
   path that is missing, the static flag is what catches it.
 - Commands run as you, on your machine. `curl | bash` steps get a warning
   in the report; use `--docker` if the README is not yours.
+
+## Install
+
+```bash
+npm i -g coldstart-cli     # or just npx coldstart-cli
+```
 
 MIT
