@@ -1,6 +1,6 @@
 // selfcheck: build a fixture repo whose README fails at a known step,
 // run coldstart on it, assert the verdict and the failing step.
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -92,4 +92,50 @@ assert(report2.verdict === "passes", `expected passes, got ${report2.verdict}`);
 assert(r2.status === 0, `expected exit 0, got ${r2.status}`);
 assert(r.status === 1, `expected exit 1 for broken repo, got ${r.status}`);
 
-console.log("selfcheck ok: broken repo fails at the right step, fixed repo passes");
+// fixture B: regressions. exit-127 from an INNER command must fail (not skip),
+// extension-bearing names like app.py are real files not placeholders,
+// `cd x && cmd` compounds, fences with info strings still parse, and
+// <!-- coldstart:ignore --> blocks are skipped.
+const fx2 = mkdtempSync(join(tmpdir(), "coldstart-fixture-b-"));
+mkdirSync(join(fx2, "sub"));
+writeFileSync(join(fx2, "sub", "keep.txt"), "x");
+writeFileSync(
+  join(fx2, "package.json"),
+  JSON.stringify(
+    { name: "fxb", scripts: { build: "definitely-not-a-binary-xyz --run" } },
+    null,
+    2
+  )
+);
+writeFileSync(
+  join(fx2, "README.md"),
+  `# fixture b
+
+## Install
+
+\`\`\`bash copy
+cd sub && echo moved-in
+\`\`\`
+
+<!-- coldstart:ignore -->
+\`\`\`bash
+this-is-not-a-real-command-xyz
+\`\`\`
+
+## Run
+
+\`\`\`bash
+cd ..
+npm run build
+cat app.py
+echo tail-step
+\`\`\`
+`
+);
+execFileSync("git", ["init", "-q"], { cwd: fx2 });
+execFileSync("git", ["add", "-A"], { cwd: fx2 });
+execFileSync(
+  "git",
+  ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+  { cwd: fx2 }
+);
