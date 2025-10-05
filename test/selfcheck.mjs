@@ -139,3 +139,13 @@ execFileSync(
   ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
   { cwd: fx2 }
 );
+
+const r3 = spawnSync("node", [bin, "--json", "--keep-going", fx2], {
+  encoding: "utf8",
+});
+const rep3 = parseReport(r3);
+const byCmd = (c) => rep3.results.find((x) => x.cmd === c);
+
+assert(byCmd("cd sub"), `cd half of compound should be recorded`);
+assert(byCmd("echo moved-in")?.status === "ok", `compound cd && cmd should run the rest, got ${byCmd("echo moved-in")?.status}`);
+assert(byCmd("cd ..")?.status === "cd", `cd .. should return to repo root, got ${byCmd("cd ..")?.status}`);
