@@ -149,3 +149,16 @@ const byCmd = (c) => rep3.results.find((x) => x.cmd === c);
 assert(byCmd("cd sub"), `cd half of compound should be recorded`);
 assert(byCmd("echo moved-in")?.status === "ok", `compound cd && cmd should run the rest, got ${byCmd("echo moved-in")?.status}`);
 assert(byCmd("cd ..")?.status === "cd", `cd .. should return to repo root, got ${byCmd("cd ..")?.status}`);
+assert(
+  byCmd("this-is-not-a-real-command-xyz")?.status === "skip" &&
+    byCmd("this-is-not-a-real-command-xyz")?.why === "coldstart:ignore",
+  `directive should skip, got ${byCmd("this-is-not-a-real-command-xyz")?.status}`
+);
+assert(
+  byCmd("npm run build")?.status === "fail",
+  `inner 127 must fail not skip, got ${byCmd("npm run build")?.status}`
+);
+assert(
+  byCmd("cat app.py")?.status === "fail",
+  `missing app.py must fail not skip, got ${byCmd("cat app.py")?.status} why=${byCmd("cat app.py")?.why}`
+);
