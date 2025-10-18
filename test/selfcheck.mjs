@@ -162,3 +162,37 @@ assert(
   byCmd("cat app.py")?.status === "fail",
   `missing app.py must fail not skip, got ${byCmd("cat app.py")?.status} why=${byCmd("cat app.py")?.why}`
 );
+assert(byCmd("echo tail-step")?.status === "ok", `keep-going should continue after failures`);
+assert(rep3.verdict === "broken", `fixture b should be broken, got ${rep3.verdict}`);
+
+// fixture C: the H1 repo title must not poison the quickstart filter
+// ("# awesome-build-tool" + a Contributing section: contributing commands
+// must NOT run), missing ./scripts/x.sh must FAIL (not skip), inline
+// KEY=VAL prefixes must not be treated as binaries, and `export R=$(pwd)`
+// must run through the shell instead of being stored literally.
+const fx3 = mkdtempSync(join(tmpdir(), "coldstart-fixture-c-"));
+writeFileSync(
+  join(fx3, "package.json"),
+  JSON.stringify({ name: "fxc", scripts: { ok: "echo ok-script" } }, null, 2)
+);
+writeFileSync(
+  join(fx3, "README.md"),
+  `# awesome-build-tool
+
+## Install
+
+\`\`\`bash
+echo install-ran
+FOO=bar echo inline-env-ok
+export ROOT=$(pwd)
+./scripts/setup.sh
+\`\`\`
+
+## Contributing
+
+\`\`\`bash
+echo contrib-must-not-run
+\`\`\`
+`
+);
+execFileSync("git", ["init", "-q"], { cwd: fx3 });
