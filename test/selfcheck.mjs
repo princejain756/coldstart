@@ -196,3 +196,14 @@ echo contrib-must-not-run
 `
 );
 execFileSync("git", ["init", "-q"], { cwd: fx3 });
+execFileSync("git", ["add", "-A"], { cwd: fx3 });
+execFileSync(
+  "git",
+  ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+  { cwd: fx3 }
+);
+const r4 = spawnSync("node", [bin, "--json", "--keep-going", fx3], {
+  encoding: "utf8",
+});
+const rep4 = parseReport(r4);
+const byCmd4 = (c) => rep4.results.find((x) => x.cmd === c);
