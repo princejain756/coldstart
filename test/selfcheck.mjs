@@ -207,3 +207,48 @@ const r4 = spawnSync("node", [bin, "--json", "--keep-going", fx3], {
 });
 const rep4 = parseReport(r4);
 const byCmd4 = (c) => rep4.results.find((x) => x.cmd === c);
+assert(
+  !byCmd4("echo contrib-must-not-run"),
+  "H1 title must not pull Contributing into the quickstart set"
+);
+assert(
+  byCmd4("FOO=bar echo inline-env-ok")?.status === "ok",
+  `inline KEY=VAL prefix should run, got ${byCmd4("FOO=bar echo inline-env-ok")?.status}`
+);
+assert(
+  byCmd4("export ROOT=$(pwd)")?.status === "env",
+  `command substitution should be captured as env, got ${byCmd4("export ROOT=$(pwd)")?.status}`
+);
+assert(
+  byCmd4("./scripts/setup.sh")?.status === "fail",
+  `missing ./scripts/setup.sh must fail not skip, got ${byCmd4("./scripts/setup.sh")?.status}`
+);
+
+// unit checks on extractSteps: daemon applies to the last block command
+// only, and forced directive blocks still strip $ prompts + join
+// backslash continuations
+const { extractSteps } = await import(join(root, "src", "readme.js"));
+const u = extractSteps(`# repo
+
+## Run
+
+<!-- coldstart:daemon -->
+\`\`\`bash
+npm install
+my-server --port 8000
+\`\`\`
+
+<!-- coldstart:env DEMO=1 -->
+\`\`\`bash
+$ my-custom-tool \\
+  --flag yes
+\`\`\`
+`);
+const daemonSteps = u.steps.filter((s) => s.directive?.daemon);
+const plainSteps = u.steps.filter(
+  (s) => s.directive && !s.directive.daemon && !s.directive.env
+);
+assert(
+  daemonSteps.length === 1 && daemonSteps[0].cmd === "my-server --port 8000",
+  `daemon should tag only the last block command, got ${JSON.stringify(daemonSteps.map((s) => s.cmd))}`
+);
