@@ -252,3 +252,48 @@ assert(
   daemonSteps.length === 1 && daemonSteps[0].cmd === "my-server --port 8000",
   `daemon should tag only the last block command, got ${JSON.stringify(daemonSteps.map((s) => s.cmd))}`
 );
+assert(
+  plainSteps.length === 0,
+  `non-last commands in a daemon block must not carry the daemon tag`
+);
+assert(
+  u.steps.some((s) => s.cmd === "my-custom-tool --flag yes"),
+  `prompt + continuation should join to one command, got ${JSON.stringify(u.steps.map((s) => s.cmd))}`
+);
+assert(
+  u.steps.find((s) => s.cmd === "my-custom-tool --flag yes")?.directive?.env
+    ?.DEMO === "1",
+  "env directive should ride along on the forced block"
+);
+
+// fixture D: the git clone + cd <repo> pattern every README starts with.
+// `git clone <self>` must skip (already staged), `cd <repo>` must re-enter
+// the staged clone, and staticChecks must not flag the repo dir as missing.
+// repo dir must be named `fxd` - repoName comes from the directory basename
+const fx4parent = mkdtempSync(join(tmpdir(), "coldstart-fixture-d-"));
+const fx4 = join(fx4parent, "fxd");
+mkdirSync(fx4);
+writeFileSync(
+  join(fx4, "package.json"),
+  JSON.stringify({ name: "fxd", scripts: { ok: "echo fine" } }, null, 2)
+);
+writeFileSync(
+  join(fx4, "README.md"),
+  `# fxd
+
+## Install
+
+\`\`\`bash
+git clone https://github.com/someone/fxd.git
+cd fxd
+npm run ok
+\`\`\`
+`
+);
+execFileSync("git", ["init", "-q"], { cwd: fx4 });
+execFileSync("git", ["add", "-A"], { cwd: fx4 });
+execFileSync(
+  "git",
+  ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+  { cwd: fx4 }
+);
