@@ -297,3 +297,15 @@ execFileSync(
   ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
   { cwd: fx4 }
 );
+const r5 = spawnSync("node", [bin, "--json", fx4], { encoding: "utf8" });
+const rep5 = parseReport(r5);
+const byCmd5 = (c) => rep5.results.find((x) => (x.cmd || "").startsWith(c));
+assert(
+  byCmd5("git clone")?.status === "skip" &&
+    byCmd5("git clone")?.why === "repo already cloned",
+  `self-clone should skip, got ${byCmd5("git clone")?.status} ${byCmd5("git clone")?.why}`
+);
+assert(
+  byCmd5("cd fxd")?.status === "cd",
+  `cd <repo> should re-enter the clone, got ${byCmd5("cd fxd")?.status}`
+);
