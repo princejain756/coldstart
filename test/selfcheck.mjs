@@ -309,3 +309,13 @@ assert(
   byCmd5("cd fxd")?.status === "cd",
   `cd <repo> should re-enter the clone, got ${byCmd5("cd fxd")?.status}`
 );
+assert(
+  !rep5.findings.some((f) => f.msg?.includes("'fxd'") || f.msg?.includes("`fxd`")),
+  `cd <repoName> must not flag a missing dir: ${JSON.stringify(rep5.findings)}`
+);
+assert(
+  rep5.verdict === "passes",
+  `clone+cd README should pass, got ${rep5.verdict}`
+);
+
+console.log("selfcheck ok: broken repo fails at the right step, fixed repo passes, regression fixtures behave");
