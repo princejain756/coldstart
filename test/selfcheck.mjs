@@ -39,9 +39,7 @@ const parseReport = (res) => {
   try {
     return JSON.parse(res.stdout);
   } catch {
-    console.error(
-      `selfcheck FAIL: coldstart produced no JSON (status ${res.status})\nstdout: ${(res.stdout || "").slice(0, 2000)}\nstderr: ${(res.stderr || "").slice(0, 2000)}`
-    );
+    console.error(`selfcheck FAIL: coldstart produced no JSON (status ${res.status})`);
     process.exit(1);
   }
 };
@@ -317,5 +315,19 @@ assert(
   rep5.verdict === "passes",
   `clone+cd README should pass, got ${rep5.verdict}`
 );
+
+// GITHUB_ACTIONS=true must not corrupt --json output (selfcheck runs this
+// way in CI): annotations are suppressed when JSON is requested
+const r6 = spawnSync("node", [bin, "--json", fx], {
+  encoding: "utf8",
+  env: { ...process.env, GITHUB_ACTIONS: "true" },
+});
+let parsed6 = null;
+try {
+  parsed6 = parseReport(r6);
+} catch {
+  assert(false, "--json output corrupted by CI annotations");
+}
+assert(parsed6?.verdict === "passes", "json verdict under GITHUB_ACTIONS");
 
 console.log("selfcheck ok: broken repo fails at the right step, fixed repo passes, regression fixtures behave");
