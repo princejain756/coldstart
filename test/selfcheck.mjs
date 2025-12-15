@@ -39,7 +39,9 @@ const parseReport = (res) => {
   try {
     return JSON.parse(res.stdout);
   } catch {
-    console.error(`selfcheck FAIL: coldstart produced no JSON (status ${res.status})`);
+    console.error(
+      `selfcheck FAIL: coldstart produced no JSON (status ${res.status})\nstdout: ${(res.stdout || "").slice(0, 2000)}\nstderr: ${(res.stderr || "").slice(0, 2000)}`
+    );
     process.exit(1);
   }
 };
