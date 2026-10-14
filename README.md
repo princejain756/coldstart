@@ -1,12 +1,6 @@
 # coldstart
 
-[![npm](https://img.shields.io/npm/v/coldstart-cli)](https://www.npmjs.com/package/coldstart-cli)
-[![ci](https://github.com/princejain756/coldstart/actions/workflows/ci.yml/badge.svg)](https://github.com/princejain756/coldstart/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-
 **Does your repo pass a fresh clone?**
-
-![coldstart replaying a broken quickstart](demo.gif)
 
 Every README makes a promise: run these commands and it works. coldstart
 checks the promise. It clones your repo into a clean temp dir, runs static
@@ -14,9 +8,9 @@ checks against what actually ships, then replays the commands your README
 tells a stranger to run.
 
 ```bash
-npx coldstart-cli              # replay the repo in the current directory
-npx coldstart-cli <path>       # a local repo
-npx coldstart-cli <git-url>    # or straight from GitHub
+npx coldstart              # replay the repo in the current directory
+npx coldstart <path>       # a local repo
+npx coldstart <git-url>    # or straight from GitHub
 ```
 
 ![coldstart replaying a README](demo.png)
@@ -43,58 +37,31 @@ npx coldstart-cli <git-url>    # or straight from GitHub
    referenced files, package-manager mismatches, secret env vars with no
    example file, binaries not on PATH.
 4. **Replays each command** in order. `export` and `cd` steps update the
-   session for later steps. Dev servers get a 15s startup window, stay
-   running so later steps can hit them, and get reaped at the end. Steps
-   needing placeholder paths (`./my-app`, `owner/repo`) or files the user
-   brings (`photo.jpg`) are skipped with a note, not failed.
-   `npx <the-repo's-own-package>` resolves from the registry, the way a
-   real user's machine would see it; for private packages it runs the
-   checked-out bin instead.
+   session for later steps. Dev servers get a 15s startup window and count
+   as good if they stay up. Steps needing placeholder paths (`./my-app`,
+   `owner/repo`) or files the user brings (`photo.jpg`) are skipped with a
+   note, not failed. `npx <the-repo's-own-package>` resolves from the
+   registry, the way a real user's machine would see it.
 5. **Verdict**: PASS, RUNS-with-flags, or BROKEN at the step where a new
    user hits the wall, with the last lines of real output.
 
-Exit code is non-zero on BROKEN (and on flags in `--only-static`), so it
-drops into CI. In GitHub Actions, findings land as inline annotations on
-the exact README lines:
+Exit code is non-zero on BROKEN, so it drops into CI:
 
 ```yaml
-- run: npx coldstart-cli --only-static   # fast gate, no commands executed
-- run: npx coldstart-cli                 # or the full replay
-# annotations appear automatically on GitHub Actions; locally: --github
+- run: npx coldstart --only-static   # fast gate, no commands executed
+- run: npx coldstart                 # or the full replay
 ```
 
 ## Options
 
 ```
---docker [image]   replay inside one clean container per run (auto-detects
-                   node, python, go, rust from the repo). State persists
-                   between steps: pip installs and dev servers survive
+--docker [image]   replay inside a clean container (auto-detects node,
+                   python, go, rust from the repo), not your host env
 --only-static      checks only, run nothing
 --keep-going       don't stop at the first failure
 --json             machine-readable report
---github           emit ::error/::warning annotations (auto in Actions)
 --quiet            just the verdict line
 ```
-
-## Directives
-
-HTML comments control replay without uglifying the rendered README:
-
-````markdown
-<!-- coldstart:ignore -->
-```bash
-terraform apply      # never replayed, shown as skipped
-```
-
-<!-- coldstart:env DATABASE_URL=postgres://localhost/test -->
-```bash
-npm run migrate      # runs with DATABASE_URL injected
-```
-````
-
-`coldstart:daemon` before a server block marks its last command as
-backgrounded without needing the usual dev/start naming. Earlier commands
-in the same block run normally.
 
 ## Example
 
@@ -133,7 +100,7 @@ it with the real npm error.
 ## Install
 
 ```bash
-npm i -g coldstart-cli     # or just npx coldstart-cli
+npm i -g coldstart     # or just npx coldstart
 ```
 
 MIT

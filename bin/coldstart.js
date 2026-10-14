@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { rmSync, existsSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { basename } from "node:path";
 import {
   readReadme,
   extractSteps,
@@ -22,7 +22,6 @@ options:
   --only-static      run the checks, skip executing anything
   --keep-going       don't stop at the first failure
   --json             machine-readable report
-  --github           emit GitHub Actions ::error/::warning annotations (auto in CI)
   --quiet            only the verdict line
   -h, --help
 `;
@@ -38,12 +37,11 @@ function parseArgs(argv) {
     else if (a === "--quiet" || a === "-q") o.quiet = true;
     else if (a === "--docker") {
       const next = argv[i + 1];
-      // an existing path or a git url is the target; anything else is the image
-      if (next && !next.startsWith("-") && !existsSync(next) && !/^(https?:\/\/|git@)/.test(next)) {
+      // an existing path is the target, anything else is the image name
+      if (next && !next.startsWith("-") && !existsSync(next)) {
         o.docker = argv[++i];
       } else o.docker = true;
     } else if (a.startsWith("--docker=")) o.docker = a.slice(9) || true;
-    else if (a === "--github") o.github = true;
     else if (!a.startsWith("-") && !o.target) o.target = a;
     else {
       console.error(`unknown flag: ${a}`);
@@ -60,12 +58,6 @@ if (args.help) {
 }
 
 const target = args.target ?? process.cwd();
-// resolve local paths first: basename(".") is "" and would break both the
-// `cd <repo>` shorthand and self-clone detection
-const isUrl = /^(https?:\/\/|git@|ssh:\/\/)/.test(target);
-const repoName = basename(
-  (isUrl ? target : resolve(target)).replace(/\/+$/, "")
-).replace(/\.git$/, "");
 let staged;
 try {
   staged = stageClone(target);
@@ -75,13 +67,6 @@ try {
 }
 
 const { dir: cloneDir, tmp } = staged;
-// exit handler covers every exit path, including SIGINT inside docker sessions
-// where process.exit() would skip the finally below
-process.on("exit", () => {
-  try {
-    rmSync(tmp, { recursive: true, force: true });
-  } catch {}
-});
 try {
   const readme = readReadme(cloneDir);
   if (!readme) {
@@ -105,47 +90,26 @@ try {
     process.exit(2);
   }
 
-  const findings = staticChecks(cloneDir, steps, { repoName, docker: !!docker });
+  const findings = staticChecks(cloneDir, steps);
+  for (const s of steps) {
+    const blocker = stepBlocker(cloneDir, s.cmd);
+    if (blocker) s.skipWhy = blocker;
+  }
   let results = [];
   if (!args.onlyStatic) {
-    let r;
-    try {
-      r = await replay(steps, {
+    const r = await replay(steps, {
       cloneDir,
       isServerish,
       classifyStep,
-      blocker: (cwd, cmd) => stepBlocker(cwd, cmd),
       docker,
       keepGoing: args.keepGoing,
-      repoName,
-        onStep: args.json || args.quiet ? () => {} : () => {},
-      });
-    } catch (e) {
-      console.error(`coldstart: ${e.message}`);
-      process.exit(2);
-    }
+      onStep: args.json || args.quiet ? () => {} : () => {},
+    });
     results = r.results;
   }
 
   const broken = results.some((r) => r.status === "fail" || r.status === "timeout");
   const flags = findings.filter((f) => f.level === "flag").length;
-
-  // GitHub Actions annotations - inline PR comments on the README lines.
-  // Never under --json: GITHUB_ACTIONS=true is ambient in CI and would
-  // corrupt the JSON payload (the selfcheck itself parses stdout)
-  if ((args.github || process.env.GITHUB_ACTIONS === "true") && !args.json) {
-    for (const f of findings) {
-      if (!f.line) continue;
-      const sev = f.level === "flag" ? "error" : f.level === "warn" ? "warning" : null;
-      if (sev) console.log(`::${sev} file=${readme.name},line=${f.line}::${f.msg}`);
-    }
-    for (const r of results) {
-      if (r.status === "fail" || r.status === "timeout")
-        console.log(
-          `::error file=${readme.name},line=${r.line}::step \`${r.cmd}\` ${r.status}${r.code != null ? ` (exit ${r.code})` : ""}`
-        );
-    }
-  }
 
   if (args.json) {
     console.log(
@@ -174,7 +138,7 @@ try {
   } else {
     process.stdout.write(
       render({
-        target: repoName || target,
+        target: basename(target.replace(/\/$/, "")) || target,
         readmeName: readme.name,
         how: staged.how,
         uncommitted: staged.uncommitted,
@@ -184,8 +148,7 @@ try {
       })
     );
   }
-  // static-only mode fails on flags too - that's the whole point of the gate
-  process.exit(broken || (args.onlyStatic && flags) ? 1 : 0);
+  process.exit(broken ? 1 : 0);
 } finally {
   try {
     rmSync(tmp, { recursive: true, force: true });
