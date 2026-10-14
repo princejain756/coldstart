@@ -8,9 +8,9 @@ checks against what actually ships, then replays the commands your README
 tells a stranger to run.
 
 ```bash
-npx coldstart              # replay the repo in the current directory
-npx coldstart <path>       # a local repo
-npx coldstart <git-url>    # or straight from GitHub
+npx coldstart-cli              # replay the repo in the current directory
+npx coldstart-cli <path>       # a local repo
+npx coldstart-cli <git-url>    # or straight from GitHub
 ```
 
 ![coldstart replaying a README](demo.png)
@@ -48,8 +48,8 @@ npx coldstart <git-url>    # or straight from GitHub
 Exit code is non-zero on BROKEN, so it drops into CI:
 
 ```yaml
-- run: npx coldstart --only-static   # fast gate, no commands executed
-- run: npx coldstart                 # or the full replay
+- run: npx coldstart-cli --only-static   # fast gate, no commands executed
+- run: npx coldstart-cli                 # or the full replay
 ```
 
 ## Options
@@ -100,7 +100,7 @@ it with the real npm error.
 ## Install
 
 ```bash
-npm i -g coldstart     # or just npx coldstart
+npm i -g coldstart-cli     # or just npx coldstart-cli
 ```
 
 MIT
