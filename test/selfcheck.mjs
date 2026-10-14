@@ -81,4 +81,77 @@ assert(report2.verdict === "passes", `expected passes, got ${report2.verdict}`);
 assert(r2.status === 0, `expected exit 0, got ${r2.status}`);
 assert(r.status === 1, `expected exit 1 for broken repo, got ${r.status}`);
 
-console.log("selfcheck ok: broken repo fails at the right step, fixed repo passes");
+// fixture B: regressions. exit-127 from an INNER command must fail (not skip),
+// extension-bearing names like app.py are real files not placeholders,
+// `cd x && cmd` compounds, fences with info strings still parse, and
+// <!-- coldstart:ignore --> blocks are skipped.
+const fx2 = mkdtempSync(join(tmpdir(), "coldstart-fixture-b-"));
+mkdirSync(join(fx2, "sub"));
+writeFileSync(join(fx2, "sub", "keep.txt"), "x");
+writeFileSync(
+  join(fx2, "package.json"),
+  JSON.stringify(
+    { name: "fxb", scripts: { build: "definitely-not-a-binary-xyz --run" } },
+    null,
+    2
+  )
+);
+writeFileSync(
+  join(fx2, "README.md"),
+  `# fixture b
+
+## Install
+
+\`\`\`bash copy
+cd sub && echo moved-in
+\`\`\`
+
+<!-- coldstart:ignore -->
+\`\`\`bash
+this-is-not-a-real-command-xyz
+\`\`\`
+
+## Run
+
+\`\`\`bash
+cd ..
+npm run build
+cat app.py
+echo tail-step
+\`\`\`
+`
+);
+execFileSync("git", ["init", "-q"], { cwd: fx2 });
+execFileSync("git", ["add", "-A"], { cwd: fx2 });
+execFileSync(
+  "git",
+  ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+  { cwd: fx2 }
+);
+
+const r3 = spawnSync("node", [bin, "--json", "--keep-going", fx2], {
+  encoding: "utf8",
+});
+const rep3 = JSON.parse(r3.stdout);
+const byCmd = (c) => rep3.results.find((x) => x.cmd === c);
+
+assert(byCmd("cd sub"), `cd half of compound should be recorded`);
+assert(byCmd("echo moved-in")?.status === "ok", `compound cd && cmd should run the rest, got ${byCmd("echo moved-in")?.status}`);
+assert(byCmd("cd ..")?.status === "cd", `cd .. should return to repo root, got ${byCmd("cd ..")?.status}`);
+assert(
+  byCmd("this-is-not-a-real-command-xyz")?.status === "skip" &&
+    byCmd("this-is-not-a-real-command-xyz")?.why === "coldstart:ignore",
+  `directive should skip, got ${byCmd("this-is-not-a-real-command-xyz")?.status}`
+);
+assert(
+  byCmd("npm run build")?.status === "fail",
+  `inner 127 must fail not skip, got ${byCmd("npm run build")?.status}`
+);
+assert(
+  byCmd("cat app.py")?.status === "fail",
+  `missing app.py must fail not skip, got ${byCmd("cat app.py")?.status} why=${byCmd("cat app.py")?.why}`
+);
+assert(byCmd("echo tail-step")?.status === "ok", `keep-going should continue after failures`);
+assert(rep3.verdict === "broken", `fixture b should be broken, got ${rep3.verdict}`);
+
+console.log("selfcheck ok: broken repo fails at the right step, fixed repo passes, regression fixture behaves");
