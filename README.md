@@ -37,11 +37,13 @@ npx coldstart-cli <git-url>    # or straight from GitHub
    referenced files, package-manager mismatches, secret env vars with no
    example file, binaries not on PATH.
 4. **Replays each command** in order. `export` and `cd` steps update the
-   session for later steps. Dev servers get a 15s startup window and count
-   as good if they stay up. Steps needing placeholder paths (`./my-app`,
-   `owner/repo`) or files the user brings (`photo.jpg`) are skipped with a
-   note, not failed. `npx <the-repo's-own-package>` resolves from the
-   registry, the way a real user's machine would see it.
+   session for later steps. Dev servers get a 15s startup window, stay
+   running so later steps can hit them, and get reaped at the end. Steps
+   needing placeholder paths (`./my-app`, `owner/repo`) or files the user
+   brings (`photo.jpg`) are skipped with a note, not failed.
+   `npx <the-repo's-own-package>` resolves from the registry, the way a
+   real user's machine would see it; for private packages it runs the
+   checked-out bin instead.
 5. **Verdict**: PASS, RUNS-with-flags, or BROKEN at the step where a new
    user hits the wall, with the last lines of real output.
 
@@ -84,8 +86,9 @@ npm run migrate      # runs with DATABASE_URL injected
 ```
 ````
 
-`coldstart:daemon` before a server block marks it as backgrounded without
-needing the usual dev/start naming.
+`coldstart:daemon` before a server block marks its last command as
+backgrounded without needing the usual dev/start naming. Earlier commands
+in the same block run normally.
 
 ## Example
 
