@@ -28,30 +28,37 @@ const PLACEHOLDER_LINE_RE =
 
 // Split a fenced block's text into runnable command lines.
 // Returns null when the block looks like pasted output, not commands.
-function blockToCommands(text) {
-  const rawLines = [];
+// forceKeep (a coldstart: directive is present) keeps every cleaned line.
+function blockToCommands(text, forceKeep = false) {
+  const entries = [];
   let pending = "";
+  let hadPrompt = false;
   for (const raw of text.split("\n")) {
-    let line = raw.replace(/\r$/, "");
-    const trimmed = line.trim();
+    const trimmed = raw.replace(/\r$/, "").trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
-    line = trimmed.replace(/^[$>❯%]\s+/, "");
+    const promptMatch = /^[$>❯%]\s+/.test(trimmed);
+    const line = trimmed.replace(/^[$>❯%]\s+/, "");
     if (!line || PLACEHOLDER_LINE_RE.test(line)) continue;
+    if (!pending) hadPrompt = promptMatch;
     pending = pending ? pending + line : line;
     if (pending.endsWith("\\")) {
-      pending = pending.slice(0, -1) + " ";
+      pending = pending.slice(0, -1).trimEnd() + " ";
       continue;
     }
-    rawLines.push(pending);
+    entries.push({ cmd: pending, hadPrompt });
     pending = "";
   }
-  if (pending.trim()) rawLines.push(pending.trim());
-  if (!rawLines.length) return null;
+  if (pending.trim()) entries.push({ cmd: pending.trim(), hadPrompt });
+  if (!entries.length) return null;
+  if (forceKeep) return entries.map((e) => e.cmd);
 
-  const commandish = rawLines.filter((l) => COMMANDISH_RE.test(l));
+  // a $ prompt line is a command even when the binary is custom/unknown
+  const commandish = entries.filter((e) => e.hadPrompt || COMMANDISH_RE.test(e.cmd));
   if (!commandish.length) return null; // pasted output, not commands
   // in a mixed block keep only commandish lines - output rows get dropped
-  return commandish.length === rawLines.length ? rawLines : commandish;
+  return commandish.length === entries.length
+    ? entries.map((e) => e.cmd)
+    : commandish.map((e) => e.cmd);
 }
 
 // invisible per-block controls: <!-- coldstart:ignore -->, <!-- coldstart:env K=V -->
@@ -91,24 +98,25 @@ export function extractSteps(markdown) {
     if (!fence.length) return;
     if (SHELL_LANGS.has(fenceLang)) {
       const tagged = fenceLang !== "" && fenceLang !== "text";
-      let cmds = blockToCommands(fence.join("\n"));
       // a directive means the author asserts these are commands even if none
-      // of the lines match known binaries - keep them so the rule applies
-      if (!cmds && fenceDirective) {
-        cmds = fence
-          .map((l) => l.trim())
-          .filter((l) => l && !l.startsWith("#") && !PLACEHOLDER_LINE_RE.test(l));
-      }
+      // of the lines match known binaries - forceKeep keeps them all
+      const cmds = blockToCommands(fence.join("\n"), Boolean(fenceDirective));
       if (cmds && cmds.length) {
-        for (const cmd of cmds) {
+        cmds.forEach((cmd, idx) => {
+          // daemon applies to the block's server, not every line in it
+          let stepDir = fenceDirective || undefined;
+          if (fenceDirective?.daemon && idx < cmds.length - 1) {
+            const { daemon, ...rest } = fenceDirective;
+            stepDir = Object.keys(rest).length ? rest : undefined;
+          }
           steps.push({
             cmd,
             line: fenceLine,
             heading: headingText(),
             tagged,
-            directive: fenceDirective || undefined,
+            directive: stepDir,
           });
-        }
+        });
       }
     }
     fence = [];
@@ -140,9 +148,11 @@ export function extractSteps(markdown) {
       // a directive only applies to the block right after it - any real
       // content between the comment and the fence resets it
       if (!/^\s*$/.test(line) && !/^\s*<!--/.test(line)) fenceDirective = null;
-      const head = line.match(/^\s{0,3}(#{1,4})\s+(.*)/);
+      // H2-H4 only: the # H1 repo title ("# fast-build-runner") would
+      // otherwise poison the breadcrumb and match QUICKSTART_RE everywhere
+      const head = line.match(/^\s{0,3}(#{2,4})\s+(.*)/);
       if (head) {
-        const level = head[1].length;
+        const level = head[1].length - 1;
         const text = head[2].replace(/[#*`]/g, "").trim();
         headingStack[level - 1] = text;
         headingStack.length = level;

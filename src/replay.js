@@ -63,6 +63,8 @@ const ASSIGN_RE =
   /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(("([^"]*)")|('([^']*)')|[^\s]+)\s*$/;
 const CD_RE = /^cd\s+([^\s;&|]+)\s*$/;
 const CD_THEN_RE = /^cd\s+([^\s;&|]+)\s*(?:&&|;)\s*(.+)$/;
+// KEY=VAL prefixes and sudo before the real command
+const LEAD_PREFIX_RE = /^(?:sudo\s+|[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*/;
 
 function expandVars(val, env) {
   return val.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (m, name) =>
@@ -71,24 +73,33 @@ function expandVars(val, env) {
 }
 
 function parseAssignment(cmd) {
-  const m = cmd.match(ASSIGN_RE);
+  const clean = cmd.replace(/\s+#.*$/, ""); // trailing comment
+  if (/\$\(|`/.test(clean)) return null; // command substitution: run in shell
+  const m = clean.match(ASSIGN_RE);
   if (!m) return null;
   const raw = m[3] ?? m[5] ?? m[2];
-  return { name: m[1], value: raw, quoted: m[3] != null || m[5] != null };
+  return { name: m[1], value: raw, singleQuoted: m[5] != null };
 }
 
 // 127 means "command not found" - but WHICH command matters. `npm run build`
 // propagating a missing vite is a broken README, `nix run` with no nix
-// installed is an environment gap. The name right before "not found" tells
-// us which; when output is silent we check PATH ourselves.
+// installed is an environment gap. Path-like tokens (./scripts/x.sh) missing
+// are always repo failures, never env gaps.
 function missingBinary(cmd, output, exists) {
-  const first = cmd.match(/^\s*(?:sudo\s+)?(\S+)/)?.[1]?.split("/").pop();
+  const rawFirst = cmd
+    .replace(LEAD_PREFIX_RE, "")
+    .match(/^(\S+)/)?.[1];
+  if (!rawFirst) return { first: "", firstMissing: false };
+  if (rawFirst.includes("/")) return { first: rawFirst, firstMissing: false };
   const hits = [
     ...output.matchAll(/([\w./~+-]+):\s*(?:command\s+)?not found/gi),
   ];
-  const missing = hits.at(-1)?.[1]?.split("/").pop();
-  const firstMissing = missing ? missing === first : !exists(first);
-  return { first, missing, firstMissing };
+  const rawMissing = hits.at(-1)?.[1];
+  if (rawMissing && rawMissing.includes("/"))
+    return { first: rawFirst, missing: rawMissing, firstMissing: false };
+  const missing = rawMissing?.split("/").pop();
+  const firstMissing = missing ? missing === rawFirst : !exists(rawFirst);
+  return { first: rawFirst, missing, firstMissing };
 }
 
 function hostExists(bin) {
@@ -98,7 +109,7 @@ function hostExists(bin) {
   return r.status === 0;
 }
 
-function runOnce(cmd, { cwd, env, timeoutMs }) {
+function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
   return new Promise((resolveP) => {
     const t0 = Date.now();
     // detached: own process group, so a timeout can kill the server the
@@ -125,6 +136,14 @@ function runOnce(cmd, { cwd, env, timeoutMs }) {
     proc.stdout.on("data", (d) => (out += d));
     proc.stderr.on("data", (d) => (err += d));
     const timer = setTimeout(() => {
+      if (keepAlive) {
+        // servers stay up so later steps (curl localhost:...) can hit them;
+        // the process group is reaped when the replay ends
+        try { proc.unref(); } catch {}
+        onOrphan?.(proc.pid);
+        finish({ code: null, timedOut: true });
+        return;
+      }
       try {
         process.kill(-proc.pid, "SIGKILL");
       } catch {
@@ -141,7 +160,7 @@ function runOnce(cmd, { cwd, env, timeoutMs }) {
 // into later ones - docker run --rm per step loses pip/apt installs between
 // commands
 export function dockerSession(image, cloneDir) {
-  const name = `coldstart-${process.pid}`;
+  const name = `coldstart-${process.pid}-${Date.now().toString(36)}`;
   const r = spawnSync(
     "docker",
     [
@@ -154,10 +173,20 @@ export function dockerSession(image, cloneDir) {
   if (r.status !== 0) {
     throw new Error(`docker run failed: ${(r.stderr || r.stdout || "").slice(-300)}`);
   }
+  const cleanup = () => {
+    // root-owned files in /repo would break rmSync(tmp) on Linux - wipe first
+    spawnSync("docker", ["exec", name, "sh", "-c", "rm -rf /repo/* /repo/.[!.]* 2>/dev/null || true"], { stdio: "ignore" });
+    spawnSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+  };
+  const onSig = () => { cleanup(); process.exit(130); };
+  process.once("SIGINT", onSig);
+  process.once("SIGTERM", onSig);
   return {
     name,
     dispose() {
-      spawnSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+      process.removeListener("SIGINT", onSig);
+      process.removeListener("SIGTERM", onSig);
+      cleanup();
     },
   };
 }
@@ -213,22 +242,28 @@ const STEP_TIMEOUT = 240_000;
 
 // `npx <this-repo's-own-package>` inside the clone resolves the unbuilt local
 // package, but a real user runs it from their own project - force registry.
-// bin aliases map back to the package name (npx coldstart -> coldstart-cli@latest)
+// Private/unpublished packages can't resolve @latest: run the local bin so
+// the README's intent is still exercised against the checked-out source.
 function selfPackageMap(dir) {
   try {
     const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
     const map = new Map();
-    if (pkg.name) map.set(pkg.name, pkg.name);
     const bins =
       typeof pkg.bin === "string" ? [pkg.name] : Object.keys(pkg.bin ?? {});
-    bins.forEach((b) => pkg.name && map.set(b, pkg.name));
-    return map;
+    const binFile =
+      typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.[bins[0]];
+    const local = binFile
+      ? `"${join(dir, binFile).replace(/"/g, "")}"`
+      : null;
+    if (pkg.name) map.set(pkg.name, { pkg: pkg.name, local });
+    bins.forEach((b) => pkg.name && map.set(b, { pkg: pkg.name, local }));
+    return { map, private: !!pkg.private };
   } catch {
-    return new Map();
+    return { map: new Map(), private: false };
   }
 }
 
-function rewriteSelfNpx(cmd, selfMap) {
+function rewriteSelfNpx(cmd, selfMap, isPrivate) {
   return cmd.replace(
     /\bnpx\s+(-[a-zA-Z-]+\s+)*(@?[\w./~-][\w./-]*)/g,
     (full, flags, spec) => {
@@ -236,11 +271,10 @@ function rewriteSelfNpx(cmd, selfMap) {
       const base = spec.startsWith("@")
         ? spec.split("/").slice(0, 2).join("/")
         : bare;
-      const pkg = selfMap.get(base);
-      if (pkg && !spec.includes("@", spec.startsWith("@") ? 1 : 0)) {
-        return `npx ${flags ?? ""}${pkg}@latest`;
-      }
-      return full;
+      const hit = selfMap.get(base);
+      if (!hit || spec.includes("@", spec.startsWith("@") ? 1 : 0)) return full;
+      if (isPrivate && hit.local) return hit.local;
+      return `npx ${flags ?? ""}${hit.pkg}@latest`;
     }
   );
 }
@@ -258,11 +292,13 @@ export async function replay(steps, opts) {
   } = opts;
 
   const env = {};
-  const selfMap = selfPackageMap(cloneDir);
+  const { map: selfMap, private: selfPrivate } = selfPackageMap(cloneDir);
   let cwd = cloneDir;
   const results = [];
   let stopped = false;
   const dockerSess = docker ? dockerSession(docker, cloneDir) : null;
+
+  const daemonPids = []; // servers kept alive for later steps, reaped at end
 
   const doCd = (target) => {
     const clean = target.replace(/^["']|["']$/g, "");
@@ -270,7 +306,7 @@ export async function replay(steps, opts) {
     // `cd <repo>` at the top of a README means "into the repo you cloned" -
     // our staged clone already IS that directory
     if (!existsSync(next) && clean === repoName) next = cloneDir;
-    const inside = next.startsWith(cloneDir);
+    const inside = next === cloneDir || next.startsWith(cloneDir + "/");
     const finalDir = inside ? next : cloneDir;
     const ok = existsSync(finalDir);
     if (ok) cwd = finalDir;
@@ -280,8 +316,13 @@ export async function replay(steps, opts) {
   try {
     for (const step of steps) {
       let { cmd } = step;
-      const rewritten = rewriteSelfNpx(cmd, selfMap);
-      const note = rewritten !== cmd ? "runs as registry package (what a user gets)" : null;
+      const rewritten = rewriteSelfNpx(cmd, selfMap, selfPrivate);
+      const note =
+        rewritten !== cmd
+          ? selfPrivate
+            ? "runs local bin (private package, registry version impossible)"
+            : "runs as registry package (what a user gets)"
+          : null;
       cmd = rewritten;
       if (stopped) {
         results.push({ ...step, status: "skip", why: "after failure" });
@@ -298,33 +339,33 @@ export async function replay(steps, opts) {
 
       const assign = parseAssignment(cmd);
       if (assign) {
-        env[assign.name] = expandVars(assign.value, env);
+        env[assign.name] = assign.singleQuoted
+          ? assign.value
+          : expandVars(assign.value, env);
         results.push({ ...step, status: "env", value: assign.name });
         onStep(results.at(-1));
         continue;
       }
 
-      // `cd x && rest` - the cd part updates cwd, the rest runs as a command
-      let rest = null;
-      const cdThen = cmd.match(CD_THEN_RE);
-      const cdOnly = cmd.match(CD_RE);
-      if (cdThen || cdOnly) {
+      // peel every leading `cd x &&` - `cd a && cd b && cmd` chains work
+      for (;;) {
+        const cdThen = cmd.match(CD_THEN_RE);
+        const cdOnly = cmd.match(CD_RE);
+        if (!cdThen && !cdOnly) break;
         const { ok, at } = doCd((cdThen || cdOnly)[1]);
         if (!ok) {
           results.push({ ...step, status: "fail", why: "no such dir" });
           onStep(results.at(-1));
           stopped = !keepGoing;
-          continue;
+          cmd = null;
+          break;
         }
-        if (cdOnly) {
-          results.push({ ...step, status: "cd", why: at });
-          onStep(results.at(-1));
-          continue;
-        }
-        results.push({ ...step, cmd: `cd ${cdThen[1]}`, status: "cd", why: at });
+        results.push({ ...step, cmd: `cd ${(cdThen || cdOnly)[1]}`, status: "cd", why: at });
         onStep(results.at(-1));
+        if (cdOnly) { cmd = null; break; }
         cmd = cdThen[2];
       }
+      if (cmd === null) continue;
 
       const whyBlock = blocker ? blocker(cwd, cmd) : step.skipWhy;
       const cls = whyBlock ? { run: false, why: whyBlock } : classifyStep(cmd);
@@ -338,7 +379,13 @@ export async function replay(steps, opts) {
       const timeoutMs = serverish ? SERVER_TIMEOUT : STEP_TIMEOUT;
       const r = dockerSess
         ? await runDocker(cmd, { cwd, env, cloneDir, name: dockerSess.name, timeoutMs })
-        : await runOnce(cmd, { cwd, env, timeoutMs });
+        : await runOnce(cmd, {
+            cwd,
+            env,
+            timeoutMs,
+            keepAlive: serverish,
+            onOrphan: (pid) => daemonPids.push(pid),
+          });
 
       let status;
       let why = null;
@@ -348,7 +395,7 @@ export async function replay(steps, opts) {
       else if (r.code === 127) {
         const exists = (bin) =>
           dockerSess
-            ? spawnSync("docker", ["exec", dockerSess.name, "sh", "-lc", `command -v ${bin}`], { stdio: "pipe" }).status === 0
+            ? spawnSync("docker", ["exec", dockerSess.name, "sh", "-lc", 'command -v "$1"', "sh", bin], { stdio: "pipe" }).status === 0
             : hostExists(bin);
         const { first, missing, firstMissing } = missingBinary(cmd, r.err + r.out, exists);
         if (!firstMissing) {
@@ -375,6 +422,10 @@ export async function replay(steps, opts) {
       if (status === "fail" || status === "timeout") stopped = !keepGoing;
     }
   } finally {
+    // daemon servers kept alive for later steps get reaped now
+    for (const pid of daemonPids) {
+      try { process.kill(-pid, "SIGKILL"); } catch {}
+    }
     dockerSess?.dispose();
   }
   return { results, env };

@@ -133,7 +133,7 @@ export function staticChecks(dir, steps) {
           findings.push({
             level: "flag",
             line,
-            msg: `\`${m[1]} run ${sub}\` but package.json has no "${sub}" script (has: ${scripts.slice(0, 8).join(", ") || "none"})`,
+            msg: `\`${m[1]} run ${sub}\` but package.json has no "${sub}" script (has: ${curScripts.slice(0, 8).join(", ") || "none"})`,
           });
         }
       }

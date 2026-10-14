@@ -69,6 +69,13 @@ try {
 }
 
 const { dir: cloneDir, tmp } = staged;
+// exit handler covers every exit path, including SIGINT inside docker sessions
+// where process.exit() would skip the finally below
+process.on("exit", () => {
+  try {
+    rmSync(tmp, { recursive: true, force: true });
+  } catch {}
+});
 try {
   const readme = readReadme(cloneDir);
   if (!readme) {
