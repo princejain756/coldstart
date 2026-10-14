@@ -1,9 +1,10 @@
 {
   "name": "coldstart-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Does your repo pass a fresh clone? Replays your README's install instructions in a clean checkout and reports where a new user hits a wall.",
   "type": "module",
   "bin": {
+    "coldstart-cli": "bin/coldstart.js",
     "coldstart": "bin/coldstart.js"
   },
   "scripts": {
