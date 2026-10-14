@@ -1,0 +1,8 @@
+{
+  "name": "broken-quickstart",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "echo built",
+    "test": "echo tested"
+  }
+}

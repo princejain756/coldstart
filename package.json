@@ -1,0 +1,39 @@
+{
+  "name": "coldstart",
+  "version": "0.1.0",
+  "description": "Does your repo pass a fresh clone? Replays your README's install instructions in a clean checkout and reports where a new user hits a wall.",
+  "type": "module",
+  "bin": {
+    "coldstart": "bin/coldstart.js"
+  },
+  "scripts": {
+    "selfcheck": "node test/selfcheck.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "keywords": [
+    "readme",
+    "quickstart",
+    "install",
+    "docs",
+    "ci",
+    "developer-experience",
+    "testing",
+    "fresh-clone",
+    "setup"
+  ],
+  "license": "MIT",
+  "author": "Prince Jain",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/princejain756/coldstart"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
