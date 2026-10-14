@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { rmSync, existsSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, resolve } from "node:path";
 import {
   readReadme,
   extractSteps,
@@ -22,6 +22,7 @@ options:
   --only-static      run the checks, skip executing anything
   --keep-going       don't stop at the first failure
   --json             machine-readable report
+  --github           emit GitHub Actions ::error/::warning annotations (auto in CI)
   --quiet            only the verdict line
   -h, --help
 `;
@@ -37,11 +38,12 @@ function parseArgs(argv) {
     else if (a === "--quiet" || a === "-q") o.quiet = true;
     else if (a === "--docker") {
       const next = argv[i + 1];
-      // an existing path is the target, anything else is the image name
-      if (next && !next.startsWith("-") && !existsSync(next)) {
+      // an existing path or a git url is the target; anything else is the image
+      if (next && !next.startsWith("-") && !existsSync(next) && !/^(https?:\/\/|git@)/.test(next)) {
         o.docker = argv[++i];
       } else o.docker = true;
     } else if (a.startsWith("--docker=")) o.docker = a.slice(9) || true;
+    else if (a === "--github") o.github = true;
     else if (!a.startsWith("-") && !o.target) o.target = a;
     else {
       console.error(`unknown flag: ${a}`);
@@ -91,25 +93,44 @@ try {
   }
 
   const findings = staticChecks(cloneDir, steps);
-  for (const s of steps) {
-    const blocker = stepBlocker(cloneDir, s.cmd);
-    if (blocker) s.skipWhy = blocker;
-  }
   let results = [];
   if (!args.onlyStatic) {
-    const r = await replay(steps, {
+    let r;
+    try {
+      r = await replay(steps, {
       cloneDir,
       isServerish,
       classifyStep,
+      blocker: (cwd, cmd) => stepBlocker(cwd, cmd),
       docker,
       keepGoing: args.keepGoing,
-      onStep: args.json || args.quiet ? () => {} : () => {},
-    });
+      repoName: basename(target.replace(/[/.]+$/, "")).replace(/\.git$/, ""),
+        onStep: args.json || args.quiet ? () => {} : () => {},
+      });
+    } catch (e) {
+      console.error(`coldstart: ${e.message}`);
+      process.exit(2);
+    }
     results = r.results;
   }
 
   const broken = results.some((r) => r.status === "fail" || r.status === "timeout");
   const flags = findings.filter((f) => f.level === "flag").length;
+
+  // GitHub Actions annotations - inline PR comments on the README lines
+  if (args.github || process.env.GITHUB_ACTIONS === "true") {
+    for (const f of findings) {
+      if (!f.line) continue;
+      const sev = f.level === "flag" ? "error" : f.level === "warn" ? "warning" : null;
+      if (sev) console.log(`::${sev} file=${readme.name},line=${f.line}::${f.msg}`);
+    }
+    for (const r of results) {
+      if (r.status === "fail" || r.status === "timeout")
+        console.log(
+          `::error file=${readme.name},line=${r.line}::step \`${r.cmd}\` ${r.status}${r.code != null ? ` (exit ${r.code})` : ""}`
+        );
+    }
+  }
 
   if (args.json) {
     console.log(
@@ -148,7 +169,8 @@ try {
       })
     );
   }
-  process.exit(broken ? 1 : 0);
+  // static-only mode fails on flags too - that's the whole point of the gate
+  process.exit(broken || (args.onlyStatic && flags) ? 1 : 0);
 } finally {
   try {
     rmSync(tmp, { recursive: true, force: true });

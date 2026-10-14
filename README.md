@@ -45,23 +45,47 @@ npx coldstart-cli <git-url>    # or straight from GitHub
 5. **Verdict**: PASS, RUNS-with-flags, or BROKEN at the step where a new
    user hits the wall, with the last lines of real output.
 
-Exit code is non-zero on BROKEN, so it drops into CI:
+Exit code is non-zero on BROKEN (and on flags in `--only-static`), so it
+drops into CI. In GitHub Actions, findings land as inline annotations on
+the exact README lines:
 
 ```yaml
 - run: npx coldstart-cli --only-static   # fast gate, no commands executed
 - run: npx coldstart-cli                 # or the full replay
+# annotations appear automatically on GitHub Actions; locally: --github
 ```
 
 ## Options
 
 ```
---docker [image]   replay inside a clean container (auto-detects node,
-                   python, go, rust from the repo), not your host env
+--docker [image]   replay inside one clean container per run (auto-detects
+                   node, python, go, rust from the repo). State persists
+                   between steps: pip installs and dev servers survive
 --only-static      checks only, run nothing
 --keep-going       don't stop at the first failure
 --json             machine-readable report
+--github           emit ::error/::warning annotations (auto in Actions)
 --quiet            just the verdict line
 ```
+
+## Directives
+
+HTML comments control replay without uglifying the rendered README:
+
+````markdown
+<!-- coldstart:ignore -->
+```bash
+terraform apply      # never replayed, shown as skipped
+```
+
+<!-- coldstart:env DATABASE_URL=postgres://localhost/test -->
+```bash
+npm run migrate      # runs with DATABASE_URL injected
+```
+````
+
+`coldstart:daemon` before a server block marks it as backgrounded without
+needing the usual dev/start naming.
 
 ## Example
 

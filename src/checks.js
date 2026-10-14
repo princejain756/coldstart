@@ -49,14 +49,18 @@ function which(cmd) {
   }
 }
 
-const PM_CMD_RE = /\b(npm|pnpm|yarn|bun|deno)\s+(?:run\s+)?([a-zA-Z0-9:_-]+)?/g;
+const PM_CMD_RE = /\b(npm|pnpm|yarn|bun|deno)\s+(?:run\s+)?([a-zA-Z0-9:_][a-zA-Z0-9:_-]*)?/g;
 
 // a required arg in a step that is a placeholder or a file the user supplies,
 // not something the repo ships - the step can't run meaningfully without it
 const KNOWN_ASSET_RE =
   /^(requirements\.txt|docker-compose[\w.-]*\.ya?ml|Makefile|\.env\.?\w*|package\.json|tsconfig\.json|setup\.py|pyproject\.toml|go\.mod|Cargo\.toml|Gemfile|composer\.json)$/i;
 
+// commands that CREATE their path arguments - a missing target is the point
+const CREATES_ARG_RE = /^\s*(mkdir|touch|git\s+clone|cp\b|mv\b|ln\b|tee\b|cat\s*>)/;
+
 export function stepBlocker(dir, cmd) {
+  if (CREATES_ARG_RE.test(cmd)) return null;
   for (const m of cmd.matchAll(/(?:^|\s)(\S+)/g)) {
     let p = m[1].replace(/^['"(]/, "").replace(/[)>'"`,;]+$/, "");
     if (!p || p.startsWith("-") || p.includes("=") || p.startsWith("$")) continue;
@@ -67,13 +71,20 @@ export function stepBlocker(dir, cmd) {
     if (existsSync(join(dir, bare)) || existsSync(join(dir, bare.split("/").pop()))) continue;
     if (KNOWN_ASSET_RE.test(bare.split("/").pop())) continue; // real missing asset: let it fail
 
-    if (/^[\w.-]+\/[\w.-]+$/.test(bare)) {
+    const segs = bare.split("/");
+    const lastSeg = segs[segs.length - 1];
+    const hasExt = /\.[a-z0-9]+$/i.test(lastSeg);
+    // owner/repo-style slugs are placeholders; real file paths just get
+    // checked for existence (missing -> the step fails on its own)
+    if (!hasExt && /^[\w.-]+\/[\w.-]+$/.test(bare)) {
       return `needs a real repo/owner arg (\`${bare}\` is an example)`;
     }
-    if (PLACEHOLDER_RE.test(bare.split("/")[0])) {
+    // placeholder words only count extension-free names, so `app.py`,
+    // `project.json` and friends still get evaluated for real
+    if (!hasExt && PLACEHOLDER_RE.test(segs[0])) {
       return `needs your own path (\`${bare}\` is a placeholder)`;
     }
-    const base = bare.split("/").pop();
+    const base = lastSeg;
     if (USER_INPUT_RE.test(base)) return `needs your file \`${base}\``;
     // single-segment relative arg that doesn't exist: the README means "yours"
     if (hadDotSlash && !bare.includes("/")) {
@@ -97,16 +108,24 @@ export function staticChecks(dir, steps) {
   const envVars = new Set();
   const checkedScripts = new Set();
   const missingFiles = new Map();
+  let curDir = dir;
+  let curScripts = scripts;
 
   for (const { cmd, line } of steps) {
+    // follow cd steps so script checks hit the right package.json (monorepos)
+    const cdTo = cmd.match(/^\s*cd\s+([^\s;&|]+)/)?.[1];
+    if (cdTo && !cdTo.startsWith("/") && !cdTo.includes("..") && existsSync(join(curDir, cdTo))) {
+      curDir = join(curDir, cdTo);
+      curScripts = readPkgScripts(curDir) ?? curScripts;
+    }
     for (const m of cmd.matchAll(PM_CMD_RE)) {
       pmInReadme.add(m[1]);
       const sub = m[2];
       if (
-        scripts &&
+        curScripts &&
         sub &&
         !["install", "i", "ci", "add", "remove", "test", "exec", "dlx", "create", "init", "audit", "outdated", "publish", "login", "whoami", "run"].includes(sub) &&
-        !scripts.includes(sub)
+        !curScripts.includes(sub)
       ) {
         const key = `${m[1]} run ${sub}`;
         if (!checkedScripts.has(key)) {
