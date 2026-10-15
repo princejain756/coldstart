@@ -205,8 +205,8 @@ assert(
   `inline KEY=VAL prefix should run, got ${byCmd4("FOO=bar echo inline-env-ok")?.status}`
 );
 assert(
-  byCmd4("export ROOT=$(pwd)")?.status === "ok",
-  `command substitution must run via shell, got ${byCmd4("export ROOT=$(pwd)")?.status}`
+  byCmd4("export ROOT=$(pwd)")?.status === "env",
+  `command substitution should be captured as env, got ${byCmd4("export ROOT=$(pwd)")?.status}`
 );
 assert(
   byCmd4("./scripts/setup.sh")?.status === "fail",
@@ -255,4 +255,70 @@ assert(
   "env directive should ride along on the forced block"
 );
 
-console.log("selfcheck ok: broken repo fails at the right step, fixed repo passes, regression fixture behaves");
+// fixture D: the git clone + cd <repo> pattern every README starts with.
+// `git clone <self>` must skip (already staged), `cd <repo>` must re-enter
+// the staged clone, and staticChecks must not flag the repo dir as missing.
+// repo dir must be named `fxd` - repoName comes from the directory basename
+const fx4parent = mkdtempSync(join(tmpdir(), "coldstart-fixture-d-"));
+const fx4 = join(fx4parent, "fxd");
+mkdirSync(fx4);
+writeFileSync(
+  join(fx4, "package.json"),
+  JSON.stringify({ name: "fxd", scripts: { ok: "echo fine" } }, null, 2)
+);
+writeFileSync(
+  join(fx4, "README.md"),
+  `# fxd
+
+## Install
+
+\`\`\`bash
+git clone https://github.com/someone/fxd.git
+cd fxd
+npm run ok
+\`\`\`
+`
+);
+execFileSync("git", ["init", "-q"], { cwd: fx4 });
+execFileSync("git", ["add", "-A"], { cwd: fx4 });
+execFileSync(
+  "git",
+  ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+  { cwd: fx4 }
+);
+const r5 = spawnSync("node", [bin, "--json", fx4], { encoding: "utf8" });
+const rep5 = JSON.parse(r5.stdout);
+const byCmd5 = (c) => rep5.results.find((x) => (x.cmd || "").startsWith(c));
+assert(
+  byCmd5("git clone")?.status === "skip" &&
+    byCmd5("git clone")?.why === "repo already cloned",
+  `self-clone should skip, got ${byCmd5("git clone")?.status} ${byCmd5("git clone")?.why}`
+);
+assert(
+  byCmd5("cd fxd")?.status === "cd",
+  `cd <repo> should re-enter the clone, got ${byCmd5("cd fxd")?.status}`
+);
+assert(
+  !rep5.findings.some((f) => f.msg?.includes("'fxd'") || f.msg?.includes("`fxd`")),
+  `cd <repoName> must not flag a missing dir: ${JSON.stringify(rep5.findings)}`
+);
+assert(
+  rep5.verdict === "passes",
+  `clone+cd README should pass, got ${rep5.verdict}`
+);
+
+// GITHUB_ACTIONS=true must not corrupt --json output (selfcheck runs this
+// way in CI): annotations are suppressed when JSON is requested
+const r6 = spawnSync("node", [bin, "--json", fx], {
+  encoding: "utf8",
+  env: { ...process.env, GITHUB_ACTIONS: "true" },
+});
+let parsed6 = null;
+try {
+  parsed6 = JSON.parse(r6.stdout);
+} catch {
+  assert(false, "--json output corrupted by CI annotations");
+}
+assert(parsed6?.verdict === "passes", "json verdict under GITHUB_ACTIONS");
+
+console.log("selfcheck ok: broken repo fails at the right step, fixed repo passes, regression fixtures behave");
