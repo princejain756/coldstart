@@ -148,6 +148,11 @@ export function extractSteps(markdown) {
       // a directive only applies to the block right after it - any real
       // content between the comment and the fence resets it
       if (!/^\s*$/.test(line) && !/^\s*<!--/.test(line)) fenceDirective = null;
+      // a second # H1 starts a fresh document context - clear the breadcrumb
+      if (/^\s{0,3}#\s+/.test(line)) {
+        headingStack.length = 0;
+        return;
+      }
       // H2-H4 only: the # H1 repo title ("# fast-build-runner") would
       // otherwise poison the breadcrumb and match QUICKSTART_RE everywhere
       const head = line.match(/^\s{0,3}(#{2,4})\s+(.*)/);
@@ -187,8 +192,23 @@ const SKIP_RE =
   /^\s*(sudo\b|open\b|code\b|xcode-select|ssh\b|git\s+push|npm\s+publish|gh\s+repo\s+create|docker\s+push|rm\s+-rf?\s*\/|say\b|osascript|npm\s+(i|install)\s+(-g|--global)\b|brew\s+install\b|brew\s+services\b)/;
 const INTERACTIVE_HINT = /create-(next|vite|react|expo|remix|nuxt|svelte)-app|npm\s+init|yarn\s+create|pnpm\s+create|read\s+-/;
 
-export function classifyStep(cmd) {
+// `git clone <url> && cd <repo>` at the top of a README re-fetches remote
+// state - coldstart already staged the committed clone, so cloning the repo
+// itself is a no-op. Sibling-repo clones still run for real.
+const CLONE_SELF_RE = /^\s*git\s+clone\s+(?:-\S+\s+)*(\S+)/;
+export function classifyStep(cmd, repoName = null) {
   if (SKIP_RE.test(cmd)) return { run: false, why: "host-side command" };
+  const cloneTarget = cmd.match(CLONE_SELF_RE)?.[1];
+  if (
+    cloneTarget &&
+    repoName &&
+    cloneTarget
+      .replace(/\/+$/, "")
+      .split("/")
+      .pop()
+      .replace(/\.git$/, "") === repoName
+  )
+    return { run: false, why: "repo already cloned" };
   if (INTERACTIVE_HINT.test(cmd)) return { run: false, why: "interactive" };
   return { run: true };
 }

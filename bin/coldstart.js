@@ -60,6 +60,12 @@ if (args.help) {
 }
 
 const target = args.target ?? process.cwd();
+// resolve local paths first: basename(".") is "" and would break both the
+// `cd <repo>` shorthand and self-clone detection
+const isUrl = /^(https?:\/\/|git@|ssh:\/\/)/.test(target);
+const repoName = basename(
+  (isUrl ? target : resolve(target)).replace(/\/+$/, "")
+).replace(/\.git$/, "");
 let staged;
 try {
   staged = stageClone(target);
@@ -99,7 +105,7 @@ try {
     process.exit(2);
   }
 
-  const findings = staticChecks(cloneDir, steps);
+  const findings = staticChecks(cloneDir, steps, { repoName, docker: !!docker });
   let results = [];
   if (!args.onlyStatic) {
     let r;
@@ -111,7 +117,7 @@ try {
       blocker: (cwd, cmd) => stepBlocker(cwd, cmd),
       docker,
       keepGoing: args.keepGoing,
-      repoName: basename(target.replace(/[/.]+$/, "")).replace(/\.git$/, ""),
+      repoName,
         onStep: args.json || args.quiet ? () => {} : () => {},
       });
     } catch (e) {
@@ -124,8 +130,10 @@ try {
   const broken = results.some((r) => r.status === "fail" || r.status === "timeout");
   const flags = findings.filter((f) => f.level === "flag").length;
 
-  // GitHub Actions annotations - inline PR comments on the README lines
-  if (args.github || process.env.GITHUB_ACTIONS === "true") {
+  // GitHub Actions annotations - inline PR comments on the README lines.
+  // Never under --json: GITHUB_ACTIONS=true is ambient in CI and would
+  // corrupt the JSON payload (the selfcheck itself parses stdout)
+  if ((args.github || process.env.GITHUB_ACTIONS === "true") && !args.json) {
     for (const f of findings) {
       if (!f.line) continue;
       const sev = f.level === "flag" ? "error" : f.level === "warn" ? "warning" : null;
@@ -166,7 +174,7 @@ try {
   } else {
     process.stdout.write(
       render({
-        target: basename(target.replace(/\/$/, "")) || target,
+        target: repoName || target,
         readmeName: readme.name,
         how: staged.how,
         uncommitted: staged.uncommitted,

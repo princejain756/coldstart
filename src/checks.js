@@ -18,8 +18,10 @@ const FILE_ARG_RE =
 // file args that are really "bring your own" inputs, not repo assets
 const USER_INPUT_RE =
   /\.(jpe?g|png|gif|webp|mp3|mp4|mov|wav|pdf|docx?|xlsx?|pptx?|csv|tsv|zip|tar|gz|sqlite|db|bin|dat)$/i;
+// exact segment matches only: "app" counts, "apps", "app.py", "app.main"
+// do not - those are real names
 const PLACEHOLDER_RE =
-  /^(my-app|myapp|your[-_]?app|your[-_]?project|example|sample|demo|foo|bar|baz|test[-_]?app|project|repo|app|website|site|input|file|path|name|<)/i;
+  /^(my-app|myapp|your[-_]?app|your[-_]?project|example|sample|demo|foo|bar|baz|test[-_]?app|project|repo|app|website|site|input|file|path|name)$/i;
 
 function detectPackageManagers(dir) {
   const found = [];
@@ -42,14 +44,29 @@ function readPkgScripts(dir) {
 
 function which(cmd) {
   try {
-    execFileSync("sh", ["-c", `command -v ${cmd}`], { stdio: "pipe" });
+    execFileSync("sh", ["-c", 'command -v "$1"', "sh", cmd], { stdio: "pipe" });
     return true;
   } catch {
     return false;
   }
 }
 
-const PM_CMD_RE = /\b(npm|pnpm|yarn|bun|deno)\s+(?:run\s+)?([a-zA-Z0-9:_][a-zA-Z0-9:_-]*)?/g;
+// lookahead keeps `bun index.ts` / `deno fmt` from matching as scripts
+const PM_CMD_RE =
+  /\b(npm|pnpm|yarn|bun|deno)\s+(run\s+|task\s+)?([a-zA-Z0-9:_-]+)(?=[\s;&|]|$)/g;
+// pm built-ins never live in package.json scripts
+const PM_BUILTINS = new Set([
+  "install", "i", "ci", "add", "remove", "rm", "uninstall", "unlink",
+  "test", "exec", "dlx", "x", "create", "init", "audit", "outdated",
+  "publish", "login", "logout", "whoami", "run", "link", "ln", "rebuild",
+  "pack", "version", "cache", "config", "store", "update", "up", "upgrade",
+  "why", "list", "ls", "info", "view", "doctor", "completion", "env",
+  "node", "bin", "root", "help", "workspaces", "fmt", "lint", "compile",
+  "task", "bundle", "install-global", "dedupe", "prune", "patch",
+]);
+// npm only runs scripts via run/start/test/stop/restart; deno via task;
+// everything else for npm/deno is a builtin or a file argument
+const PM_SCRIPT_STYLE = { npm: "explicit", deno: "task", bun: "run", pnpm: "bare", yarn: "bare" };
 
 // a required arg in a step that is a placeholder or a file the user supplies,
 // not something the repo ships - the step can't run meaningfully without it
@@ -59,9 +76,59 @@ const KNOWN_ASSET_RE =
 // commands that CREATE their path arguments - a missing target is the point
 const CREATES_ARG_RE = /^\s*(mkdir|touch|git\s+clone|cp\b|mv\b|ln\b|tee\b|cat\s*>)/;
 
+// tokens that introduce the thing being run - never treat them as path args:
+// token 0 (the command), the script after `pm run`, the target after
+// make/just/task, the tag after -t, the branch after -b/checkout
+const RUNNER_RE = /^(npm|pnpm|yarn|bun|deno|npx|bunx|make|just|task|mise|cargo|go|mvn|gradle|rake|bundle|mix|dotnet|cmake)$/i;
+const GITISH_RE = /^(git|gh|glab|hub|tea)$/;
+const HOSTISH_RE = /^(localhost|127\.|0\.0\.0\.0|0x|.*\.(com|org|net|io|dev|app|local|sh|ai|co|xyz|me)|\d+\.\d+)/i;
+
 export function stepBlocker(dir, cmd) {
   if (CREATES_ARG_RE.test(cmd)) return null;
-  for (const m of cmd.matchAll(/(?:^|\s)(\S+)/g)) {
+  const tokens = [...cmd.matchAll(/(?:^|\s)(\S+)/g)];
+  // indices to never treat as file args: the command itself, the script name
+  // after `pm run`, the target after make-style runners, flag values
+  const skipIdx = new Set();
+  let firstReal = 0;
+  while (
+    firstReal < tokens.length &&
+    /^(sudo|[A-Za-z_][A-Za-z0-9_]*=\S+|env)$/.test(tokens[firstReal][1])
+  )
+    firstReal++;
+  if (firstReal < tokens.length) {
+    skipIdx.add(firstReal);
+    const verb = tokens[firstReal][1];
+    const next = tokens[firstReal + 1]?.[1];
+    if (RUNNER_RE.test(verb) && next && !next.startsWith("-")) {
+      // `pm run script` -> skip two words; `pm script` / `make target` -> one
+      skipIdx.add(next === "run" && tokens[firstReal + 2] ? firstReal + 2 : firstReal + 1);
+    }
+    if (GITISH_RE.test(verb)) {
+      for (let i = firstReal + 1; i < Math.min(firstReal + 4, tokens.length); i++) {
+        if (/^(checkout|switch|branch|clone|remote|merge|rebase|cherry-pick)$/.test(tokens[i][1])) {
+          if (tokens[i + 1]) skipIdx.add(i + 1);
+          break;
+        }
+      }
+    }
+  }
+  // flags that consume the next token as a value (--filter apps/web, -t tag)
+  const VALUE_FLAG_RE = /^(--filter|-F|--tag|-t|--branch|-b|--name|-n|--file|-f|--output|-o|--cwd|-C|--prefix|--context|-c|--target|--env|-e|--user|-u|--workdir|-w)$/;
+  for (let i = 0; i < tokens.length - 1; i++) {
+    if (VALUE_FLAG_RE.test(tokens[i][1])) skipIdx.add(i + 1);
+  }
+
+  // a bare `owner/repo` only means a repo slug when a clone-ish or
+  // package-runner command invites it - `localhost/health`, docker tags,
+  // git branches, and ./paths never count
+  const verbForSlug = tokens[firstReal]?.[1] ?? "";
+  const slugContext =
+    GITISH_RE.test(verbForSlug) && /\bclone\b/.test(cmd)
+      ? true
+      : /^(npx|bunx|pnpx|npm|pnpm|yarn|gh|hub|tea|glab|pipx?|uvx?)$/.test(verbForSlug);
+
+  for (const m of tokens) {
+    if (skipIdx.has(tokens.indexOf(m))) continue;
     let p = m[1].replace(/^['"(]/, "").replace(/[)>'"`,;]+$/, "");
     if (!p || p.startsWith("-") || p.includes("=") || p.startsWith("$")) continue;
     if (/[>|]\s*$/.test(cmd.slice(0, m.index))) continue;
@@ -74,19 +141,16 @@ export function stepBlocker(dir, cmd) {
     const segs = bare.split("/");
     const lastSeg = segs[segs.length - 1];
     const hasExt = /\.[a-z0-9]+$/i.test(lastSeg);
-    // owner/repo-style slugs are placeholders; real file paths just get
-    // checked for existence (missing -> the step fails on its own)
-    if (!hasExt && /^[\w.-]+\/[\w.-]+$/.test(bare)) {
+    // explicit ./paths are repo files - missing means the README is broken,
+    // never a "bring your own" skip
+    if (!hadDotSlash && !hasExt && segs.length === 2 && slugContext &&
+        /^[\w.-]+\/[\w.-]+$/.test(bare) && !HOSTISH_RE.test(segs[0])) {
       return `needs a real repo/owner arg (\`${bare}\` is an example)`;
     }
-    // placeholder words only count extension-free names, so `app.py`,
-    // `project.json` and friends still get evaluated for real
     if (!hasExt && PLACEHOLDER_RE.test(segs[0])) {
       return `needs your own path (\`${bare}\` is a placeholder)`;
     }
-    const base = lastSeg;
-    if (USER_INPUT_RE.test(base)) return `needs your file \`${base}\``;
-    // single-segment relative arg that doesn't exist: the README means "yours"
+    if (USER_INPUT_RE.test(lastSeg)) return `needs your file \`${lastSeg}\``;
     if (hadDotSlash && !bare.includes("/")) {
       return `needs your own path (\`./${bare}\` isn't in the repo)`;
     }
@@ -95,7 +159,8 @@ export function stepBlocker(dir, cmd) {
 }
 
 // Static checks run against the clean clone, before any command executes.
-export function staticChecks(dir, steps) {
+export function staticChecks(dir, steps, opts = {}) {
+  const { repoName = null, docker = false } = opts;
   const findings = [];
   const pms = detectPackageManagers(dir);
   const scripts = readPkgScripts(dir);
@@ -111,29 +176,45 @@ export function staticChecks(dir, steps) {
   let curDir = dir;
   let curScripts = scripts;
 
-  for (const { cmd, line } of steps) {
+  for (const { cmd, line, directive } of steps) {
+    if (directive?.ignore) continue; // author says this block is illustrative
     // follow cd steps so script checks hit the right package.json (monorepos)
     const cdTo = cmd.match(/^\s*cd\s+([^\s;&|]+)/)?.[1];
-    if (cdTo && !cdTo.startsWith("/") && !cdTo.includes("..") && existsSync(join(curDir, cdTo))) {
-      curDir = join(curDir, cdTo);
-      curScripts = readPkgScripts(curDir) ?? curScripts;
+    if (cdTo && !cdTo.startsWith("/") && !cdTo.includes("..")) {
+      // `cd <repoName>` right after `git clone` re-enters the staged clone
+      if (cdTo === repoName) {
+        curDir = dir;
+        curScripts = scripts;
+      } else if (existsSync(join(curDir, cdTo))) {
+        curDir = join(curDir, cdTo);
+        curScripts = readPkgScripts(curDir) ?? curScripts;
+      }
     }
     for (const m of cmd.matchAll(PM_CMD_RE)) {
-      pmInReadme.add(m[1]);
-      const sub = m[2];
+      const [full, pm, runKw, sub] = m;
+      pmInReadme.add(pm);
+      if (!sub) continue;
+      const style = PM_SCRIPT_STYLE[pm];
+      const isScript =
+        style === "bare" ||
+        (style === "task" && runKw === "task ") ||
+        (style === "explicit" &&
+          (runKw === "run " || ["start", "test", "stop", "restart"].includes(sub))) ||
+        (style === "run" && runKw === "run ");
+      const scriptName = sub;
       if (
         curScripts &&
-        sub &&
-        !["install", "i", "ci", "add", "remove", "test", "exec", "dlx", "create", "init", "audit", "outdated", "publish", "login", "whoami", "run"].includes(sub) &&
-        !curScripts.includes(sub)
+        isScript &&
+        !PM_BUILTINS.has(scriptName) &&
+        !curScripts.includes(scriptName)
       ) {
-        const key = `${m[1]} run ${sub}`;
+        const key = `${pm} ${scriptName}`;
         if (!checkedScripts.has(key)) {
           checkedScripts.add(key);
           findings.push({
             level: "flag",
             line,
-            msg: `\`${m[1]} run ${sub}\` but package.json has no "${sub}" script (has: ${curScripts.slice(0, 8).join(", ") || "none"})`,
+            msg: `\`${full.trim()}\` but package.json has no "${scriptName}" script (has: ${curScripts.slice(0, 8).join(", ") || "none"})`,
           });
         }
       }
@@ -180,6 +261,7 @@ export function staticChecks(dir, steps) {
     if (cdMatch && !cdMatch[1].startsWith("/") && !cdMatch[1].includes("..")) {
       const p = cdMatch[1];
       if (
+        p !== repoName && // `cd <repo>` re-enters the staged clone, not missing
         !PLACEHOLDER_RE.test(p) &&
         !existsSync(join(dir, p)) &&
         !missingFiles.has(p)
@@ -213,7 +295,7 @@ export function staticChecks(dir, steps) {
         msg: `README uses \`${pm}\` but the repo ships a ${lockfilePm} lockfile`,
       });
     }
-    if (!which(pm)) {
+    if (!docker && !which(pm)) {
       findings.push({
         level: "warn",
         msg: `\`${pm}\` is used by the README but is not on this machine's PATH`,
@@ -239,12 +321,14 @@ export function staticChecks(dir, steps) {
       wanted.add(first);
     }
   }
-  for (const b of wanted) {
-    if (!which(b)) {
-      findings.push({
-        level: "warn",
-        msg: `README needs \`${b}\` - not on this machine's PATH (fresh users may not have it either)`,
-      });
+  if (!docker) {
+    for (const b of wanted) {
+      if (!which(b)) {
+        findings.push({
+          level: "warn",
+          msg: `README needs \`${b}\` - not on this machine's PATH (fresh users may not have it either)`,
+        });
+      }
     }
   }
 

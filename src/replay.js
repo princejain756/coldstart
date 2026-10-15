@@ -109,6 +109,22 @@ function hostExists(bin) {
   return r.status === 0;
 }
 
+// live host processes + docker exec clients, reaped on SIGINT/SIGTERM.
+// detached children get their own process group (-pid); plain children are
+// killed directly.
+const liveProcs = new Set();
+
+function reapLive() {
+  for (const proc of liveProcs) {
+    try {
+      if (proc.pid) process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      try { proc.kill("SIGKILL"); } catch {}
+    }
+  }
+  liveProcs.clear();
+}
+
 function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
   return new Promise((resolveP) => {
     const t0 = Date.now();
@@ -120,6 +136,8 @@ function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     });
+    liveProcs.add(proc);
+    const drop = () => liveProcs.delete(proc);
     // answer "y" once so npx-style install prompts behave like a real user
     // pressing enter; stdin then closes so nothing blocks on it
     proc.stdin.write("y\n");
@@ -130,6 +148,7 @@ function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
     const finish = (r) => {
       if (done) return;
       done = true;
+      drop();
       clearTimeout(timer);
       resolveP({ ...r, out, err, ms: Date.now() - t0 });
     };
@@ -138,8 +157,9 @@ function runOnce(cmd, { cwd, env, timeoutMs, keepAlive, onOrphan }) {
     const timer = setTimeout(() => {
       if (keepAlive) {
         // servers stay up so later steps (curl localhost:...) can hit them;
-        // the process group is reaped when the replay ends
+        // the process group is reaped on transition or when the replay ends
         try { proc.unref(); } catch {}
+        drop();
         onOrphan?.(proc.pid);
         finish({ code: null, timedOut: true });
         return;
@@ -175,20 +195,10 @@ export function dockerSession(image, cloneDir) {
   }
   const cleanup = () => {
     // root-owned files in /repo would break rmSync(tmp) on Linux - wipe first
-    spawnSync("docker", ["exec", name, "sh", "-c", "rm -rf /repo/* /repo/.[!.]* 2>/dev/null || true"], { stdio: "ignore" });
+    spawnSync("docker", ["exec", name, "sh", "-c", "rm -rf /repo/* /repo/.[!.]* /tmp/cs-d-*.pid 2>/dev/null || true"], { stdio: "ignore" });
     spawnSync("docker", ["rm", "-f", name], { stdio: "ignore" });
   };
-  const onSig = () => { cleanup(); process.exit(130); };
-  process.once("SIGINT", onSig);
-  process.once("SIGTERM", onSig);
-  return {
-    name,
-    dispose() {
-      process.removeListener("SIGINT", onSig);
-      process.removeListener("SIGTERM", onSig);
-      cleanup();
-    },
-  };
+  return { name, dispose: cleanup };
 }
 
 function dockerExecArgs(cmd, { cwd, env, cloneDir, name }) {
@@ -199,30 +209,59 @@ function dockerExecArgs(cmd, { cwd, env, cloneDir, name }) {
 }
 
 function runDocker(cmd, opts) {
-  const args = dockerExecArgs(cmd, opts);
+  const { daemonId } = opts;
+  // daemon servers run under setsid with a pidfile inside the container so a
+  // later server step (or cleanup) can kill the whole process group by pgid
+  const wrapped = daemonId
+    ? `setsid sh -c 'echo $$ > /tmp/cs-d-${daemonId}.pid; exec ${cmd.replace(/'/g, "'\\''")}' 2>/dev/null || sh -lc ${JSON.stringify(cmd)}`
+    : cmd;
+  const args = dockerExecArgs(wrapped, opts);
   return new Promise((resolveP) => {
     const t0 = Date.now();
     const proc = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    liveProcs.add(proc);
+    const drop = () => liveProcs.delete(proc);
     let out = "";
     let err = "";
     let done = false;
     const finish = (r) => {
       if (done) return;
       done = true;
+      drop();
       clearTimeout(timer);
       resolveP({ ...r, out, err, ms: Date.now() - t0 });
     };
     proc.stdout.on("data", (d) => (out += d));
     proc.stderr.on("data", (d) => (err += d));
     const timer = setTimeout(() => {
-      // killing the client detaches but the container keeps running - which
-      // for server steps is exactly right (later steps can still curl it)
+      // killing the client detaches but the in-container server keeps
+      // running - later steps can still curl it; reaped via pidfile
       proc.kill("SIGKILL");
       finish({ code: null, timedOut: true });
     }, opts.timeoutMs);
     proc.on("close", (code) => finish({ code, timedOut: false }));
     proc.on("error", () => finish({ code: 127, timedOut: false }));
   });
+}
+
+function dockerKillDaemon(name, id) {
+  spawnSync(
+    "docker",
+    ["exec", name, "sh", "-c",
+     `kill -9 -$(cat /tmp/cs-d-${id}.pid) 2>/dev/null || kill -9 $(cat /tmp/cs-d-${id}.pid) 2>/dev/null || true; rm -f /tmp/cs-d-${id}.pid`],
+    { stdio: "ignore" }
+  );
+}
+
+// `export A=$(cmd)` can't be captured by regex - run it in the session shell
+// and print the resulting value so later steps see it
+function evalAssign(cmd, name, { cwd, env, cloneDir, dockerSess }) {
+  const evalCmd = `${cmd}; printf '\\n%s' "\$${name}"`;
+  const r = dockerSess
+    ? spawnSync("docker", dockerExecArgs(evalCmd, { cwd, env, cloneDir, name: dockerSess.name }), { encoding: "utf8" })
+    : spawnSync("sh", ["-c", evalCmd], { cwd, env: { ...process.env, ...env }, encoding: "utf8" });
+  if (r.status !== 0) return { ok: false };
+  return { ok: true, value: (r.stdout ?? "").replace(/^[\s\S]*\n/, "") };
 }
 
 export function defaultDockerImage(dir) {
@@ -244,7 +283,7 @@ const STEP_TIMEOUT = 240_000;
 // package, but a real user runs it from their own project - force registry.
 // Private/unpublished packages can't resolve @latest: run the local bin so
 // the README's intent is still exercised against the checked-out source.
-function selfPackageMap(dir) {
+function selfPackageMap(dir, docker) {
   try {
     const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
     const map = new Map();
@@ -252,8 +291,9 @@ function selfPackageMap(dir) {
       typeof pkg.bin === "string" ? [pkg.name] : Object.keys(pkg.bin ?? {});
     const binFile =
       typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.[bins[0]];
+    // inside --docker the repo lives at /repo, not the host clone path
     const local = binFile
-      ? `"${join(dir, binFile).replace(/"/g, "")}"`
+      ? `"${(docker ? `/repo/${binFile.replace(/^\.\//, "")}` : join(dir, binFile)).replace(/"/g, "")}"`
       : null;
     if (pkg.name) map.set(pkg.name, { pkg: pkg.name, local });
     bins.forEach((b) => pkg.name && map.set(b, { pkg: pkg.name, local }));
@@ -292,13 +332,39 @@ export async function replay(steps, opts) {
   } = opts;
 
   const env = {};
-  const { map: selfMap, private: selfPrivate } = selfPackageMap(cloneDir);
+  const { map: selfMap, private: selfPrivate } = selfPackageMap(cloneDir, docker);
   let cwd = cloneDir;
   const results = [];
   let stopped = false;
   const dockerSess = docker ? dockerSession(docker, cloneDir) : null;
 
-  const daemonPids = []; // servers kept alive for later steps, reaped at end
+  // backgrounded servers: explicit coldstart:daemon ones survive server
+  // transitions; heuristic ones get reaped so a second server can't
+  // EADDRINUSE on the first's port
+  const daemons = [];
+  const reapDaemons = (onlyImplicit) => {
+    for (let i = daemons.length - 1; i >= 0; i--) {
+      const d = daemons[i];
+      if (onlyImplicit && d.keep) continue;
+      try {
+        if (d.dockerId != null && dockerSess) dockerKillDaemon(dockerSess.name, d.dockerId);
+        else if (d.pid) process.kill(-d.pid, "SIGKILL");
+      } catch {}
+      daemons.splice(i, 1);
+    }
+  };
+  let daemonSeq = 0;
+
+  // one signal path for host and docker: kill live children + daemons,
+  // drop the container, exit. The tmp dir is removed by bin's exit handler.
+  const onSig = () => {
+    reapLive();
+    reapDaemons(false);
+    dockerSess?.dispose();
+    process.exit(130);
+  };
+  process.once("SIGINT", onSig);
+  process.once("SIGTERM", onSig);
 
   const doCd = (target) => {
     const clean = target.replace(/^["']|["']$/g, "");
@@ -346,6 +412,20 @@ export async function replay(steps, opts) {
         onStep(results.at(-1));
         continue;
       }
+      // `export A=$(cmd)` - evaluate in the session and capture the value,
+      // otherwise the variable dies with the child sh
+      const subAssign = cmd
+        .replace(/\s+#.*$/, "")
+        .match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=([^=]*)$/);
+      if (subAssign && /\$\(|`/.test(subAssign[2])) {
+        const ev = evalAssign(cmd, subAssign[1], { cwd, env, cloneDir, dockerSess });
+        if (ev.ok) {
+          env[subAssign[1]] = ev.value;
+          results.push({ ...step, status: "env", value: subAssign[1] });
+          onStep(results.at(-1));
+          continue;
+        }
+      }
 
       // peel every leading `cd x &&` - `cd a && cd b && cmd` chains work
       for (;;) {
@@ -368,7 +448,7 @@ export async function replay(steps, opts) {
       if (cmd === null) continue;
 
       const whyBlock = blocker ? blocker(cwd, cmd) : step.skipWhy;
-      const cls = whyBlock ? { run: false, why: whyBlock } : classifyStep(cmd);
+      const cls = whyBlock ? { run: false, why: whyBlock } : classifyStep(cmd, repoName);
       if (!cls.run) {
         results.push({ ...step, status: "skip", why: cls.why });
         onStep(results.at(-1));
@@ -376,16 +456,24 @@ export async function replay(steps, opts) {
       }
 
       const serverish = isServerish(cmd) || !!step.directive?.daemon;
+      // a second heuristic server replaces the first (dev -> start would
+      // EADDRINUSE on the same port); explicit daemons are kept on purpose
+      if (serverish && !step.directive?.daemon) reapDaemons(true);
       const timeoutMs = serverish ? SERVER_TIMEOUT : STEP_TIMEOUT;
+      const dockerId = dockerSess && serverish ? ++daemonSeq : null;
       const r = dockerSess
-        ? await runDocker(cmd, { cwd, env, cloneDir, name: dockerSess.name, timeoutMs })
+        ? await runDocker(cmd, { cwd, env, cloneDir, name: dockerSess.name, timeoutMs, daemonId: dockerId })
         : await runOnce(cmd, {
             cwd,
             env,
             timeoutMs,
             keepAlive: serverish,
-            onOrphan: (pid) => daemonPids.push(pid),
+            onOrphan: (pid) =>
+              daemons.push({ pid, keep: !!step.directive?.daemon }),
           });
+
+      if (dockerSess && serverish && r.timedOut)
+        daemons.push({ dockerId, keep: !!step.directive?.daemon });
 
       let status;
       let why = null;
@@ -422,10 +510,9 @@ export async function replay(steps, opts) {
       if (status === "fail" || status === "timeout") stopped = !keepGoing;
     }
   } finally {
-    // daemon servers kept alive for later steps get reaped now
-    for (const pid of daemonPids) {
-      try { process.kill(-pid, "SIGKILL"); } catch {}
-    }
+    process.removeListener("SIGINT", onSig);
+    process.removeListener("SIGTERM", onSig);
+    reapDaemons(false);
     dockerSess?.dispose();
   }
   return { results, env };
