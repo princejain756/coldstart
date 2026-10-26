@@ -8,7 +8,8 @@
     "coldstart": "bin/coldstart.js"
   },
   "scripts": {
-    "selfcheck": "node test/selfcheck.mjs"
+    "selfcheck": "node test/selfcheck.mjs",
+    "test": "node test/selfcheck.mjs"
   },
   "engines": {
     "node": ">=18"
