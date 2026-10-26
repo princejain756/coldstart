@@ -1,6 +1,12 @@
 # coldstart
 
+[![npm](https://img.shields.io/npm/v/coldstart-cli)](https://www.npmjs.com/package/coldstart-cli)
+[![ci](https://github.com/princejain756/coldstart/actions/workflows/ci.yml/badge.svg)](https://github.com/princejain756/coldstart/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 **Does your repo pass a fresh clone?**
+
+![coldstart replaying a broken quickstart](demo.gif)
 
 Every README makes a promise: run these commands and it works. coldstart
 checks the promise. It clones your repo into a clean temp dir, runs static
