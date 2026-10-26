@@ -35,8 +35,19 @@ execFileSync(
   { cwd: fx }
 );
 
+const parseReport = (res) => {
+  try {
+    return JSON.parse(res.stdout);
+  } catch {
+    console.error(
+      `selfcheck FAIL: coldstart produced no JSON (status ${res.status})\nstdout: ${(res.stdout || "").slice(0, 2000)}\nstderr: ${(res.stderr || "").slice(0, 2000)}`
+    );
+    process.exit(1);
+  }
+};
+
 const r = spawnSync("node", [bin, "--json", fx], { encoding: "utf8" });
-const report = JSON.parse(r.stdout);
+const report = parseReport(r);
 
 const assert = (cond, msg) => {
   if (!cond) {
@@ -76,7 +87,7 @@ execFileSync(
   { cwd: fx }
 );
 const r2 = spawnSync("node", [bin, "--json", fx], { encoding: "utf8" });
-const report2 = JSON.parse(r2.stdout);
+const report2 = parseReport(r2);
 assert(report2.verdict === "passes", `expected passes, got ${report2.verdict}`);
 assert(r2.status === 0, `expected exit 0, got ${r2.status}`);
 assert(r.status === 1, `expected exit 1 for broken repo, got ${r.status}`);
@@ -132,7 +143,7 @@ execFileSync(
 const r3 = spawnSync("node", [bin, "--json", "--keep-going", fx2], {
   encoding: "utf8",
 });
-const rep3 = JSON.parse(r3.stdout);
+const rep3 = parseReport(r3);
 const byCmd = (c) => rep3.results.find((x) => x.cmd === c);
 
 assert(byCmd("cd sub"), `cd half of compound should be recorded`);
@@ -194,7 +205,7 @@ execFileSync(
 const r4 = spawnSync("node", [bin, "--json", "--keep-going", fx3], {
   encoding: "utf8",
 });
-const rep4 = JSON.parse(r4.stdout);
+const rep4 = parseReport(r4);
 const byCmd4 = (c) => rep4.results.find((x) => x.cmd === c);
 assert(
   !byCmd4("echo contrib-must-not-run"),
@@ -287,7 +298,7 @@ execFileSync(
   { cwd: fx4 }
 );
 const r5 = spawnSync("node", [bin, "--json", fx4], { encoding: "utf8" });
-const rep5 = JSON.parse(r5.stdout);
+const rep5 = parseReport(r5);
 const byCmd5 = (c) => rep5.results.find((x) => (x.cmd || "").startsWith(c));
 assert(
   byCmd5("git clone")?.status === "skip" &&
@@ -315,7 +326,7 @@ const r6 = spawnSync("node", [bin, "--json", fx], {
 });
 let parsed6 = null;
 try {
-  parsed6 = JSON.parse(r6.stdout);
+  parsed6 = parseReport(r6);
 } catch {
   assert(false, "--json output corrupted by CI annotations");
 }
